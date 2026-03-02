@@ -1,0 +1,8 @@
+.adk
+.venv
+.env
+agent_output.txt
+local.md
+README.md
+*__pycache__*
+*.pyc

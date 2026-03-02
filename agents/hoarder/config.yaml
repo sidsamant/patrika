@@ -1,0 +1,24 @@
+sources:
+  - id: filesystem
+    enabled: true
+    path: "D:/ai/adk/demofiles"
+
+  - id: confluence
+    enabled: false
+    path: "./data/confluence"
+
+  - id: gdocs
+    enabled: false
+    path: "./data/gdocs"
+
+  - id: sharepoint
+    enabled: false
+    path: "./data/sharepoint"
+
+  - id: slack
+    enabled: false
+    path: "./data/slack"
+
+  - id: whatsapp
+    enabled: false
+    path: "./data/whatsapp"
