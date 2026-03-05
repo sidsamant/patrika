@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import AsyncGenerator
 
 import ollama
@@ -11,6 +12,14 @@ from google.adk.events import Event
 from google.genai import types
 
 from .util import reviewer_instruction_provider
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SCREENER_OUTPUT_PATH = PROJECT_ROOT / "outputs" / "screener.json"
+
+
+def _persist_screener_output(payload: str) -> None:
+    SCREENER_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SCREENER_OUTPUT_PATH.write_text(payload, encoding="utf-8")
 
 
 class FileMetadataScreeningAgent(BaseAgent):
@@ -55,6 +64,8 @@ class FileMetadataScreeningAgent(BaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         raw_list = ctx.session.state.get("file_list")
         if not raw_list or (isinstance(raw_list, str) and not raw_list.strip()):
+            ctx.session.state["screened_file_list"] = "[]"
+            _persist_screener_output("[]")
             yield Event(
                 author=self.name,
                 invocation_id=ctx.invocation_id,
@@ -64,6 +75,8 @@ class FileMetadataScreeningAgent(BaseAgent):
 
         prompt = reviewer_instruction_provider(ctx)
         ollama_response = self._call_ollama(prompt)
+        ctx.session.state["screened_file_list"] = ollama_response
+        _persist_screener_output(ollama_response)
 
         yield Event(
             author=self.name,

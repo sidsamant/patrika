@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import AsyncGenerator
@@ -11,8 +12,16 @@ from google.adk.events import Event
 from agents.hoarder.agent import root_agent as hoarder_agent
 from agents.screener.agent import file_metadata_screening_agent as ollama_screener_agent
 from agents.screener.agent_hosted import file_metadata_screening_agent as hosted_screener_agent
+from agents.standardizer.agent import standardizer_agent
 
 OUTPUT_FILE_PATH = Path(__file__).with_name("agent_output.txt")
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+)
+logging.getLogger("google_adk").setLevel(logging.DEBUG)
+logging.getLogger("google.adk").setLevel(logging.DEBUG)
 
 
 class PersistentOutputSequentialAgent(SequentialAgent):
@@ -39,11 +48,12 @@ class PersistentOutputSequentialAgent(SequentialAgent):
 
 root_agent = PersistentOutputSequentialAgent(
     name="root_document_pipeline",
-    description="Root sequential pipeline: hoarder retrieval followed by metadata screening.",
+    description="Root sequential pipeline: hoarder retrieval, metadata screening, and standardization.",
     sub_agents=[
         hoarder_agent,
         ollama_screener_agent
         if os.getenv("SCREENER_BACKEND", "hosted").strip().lower() == "ollama"
         else hosted_screener_agent,
+        standardizer_agent,
     ],
 )
