@@ -620,6 +620,12 @@ class DocumentStandardizerAgent(BaseAgent):
 
             connection.commit()
 
+        standardizer_payload = {
+            "persistedCount": len(standardized_documents),
+            "databasePath": str(DB_PATH),
+            "screenedInputSource": screened_source,
+            "documents": standardized_documents,
+        }
         ctx.session.state["standardized_documents"] = json.dumps(standardized_documents)
 
         yield Event(
@@ -629,16 +635,7 @@ class DocumentStandardizerAgent(BaseAgent):
                 role="model",
                 parts=[
                     types.Part(
-                        text=json.dumps(
-                            {
-                                "persistedCount": len(standardized_documents),
-                                "databasePath": str(DB_PATH),
-                                "screenedInputSource": screened_source,
-                                "documents": standardized_documents,
-                            },
-                            indent=2,
-                            default=str,
-                        )
+                        text=json.dumps(standardizer_payload, indent=2, default=str)
                     )
                 ],
             ),

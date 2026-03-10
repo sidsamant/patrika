@@ -5,13 +5,17 @@ import os
 from pathlib import Path
 from typing import AsyncGenerator
 
+from env import load_local_env
 from google.adk.agents import SequentialAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 
+load_local_env()
+
 from agents.hoarder.agent import root_agent as hoarder_agent
 from agents.screener.agent import file_metadata_screening_agent as ollama_screener_agent
 from agents.screener.agent_hosted import file_metadata_screening_agent as hosted_screener_agent
+from agents.segmentizer.agent import segmentizer_agent
 from agents.standardizer.agent import standardizer_agent
 
 OUTPUT_FILE_PATH = Path(__file__).with_name("agent_output.txt")
@@ -48,12 +52,13 @@ class PersistentOutputSequentialAgent(SequentialAgent):
 
 root_agent = PersistentOutputSequentialAgent(
     name="root_document_pipeline",
-    description="Root sequential pipeline: hoarder retrieval, metadata screening, and standardization.",
+    description="Root sequential pipeline: hoarder retrieval, metadata screening, standardization, and segmentization.",
     sub_agents=[
         hoarder_agent,
         ollama_screener_agent
         if os.getenv("SCREENER_BACKEND", "hosted").strip().lower() == "ollama"
         else hosted_screener_agent,
         standardizer_agent,
+        segmentizer_agent,
     ],
 )

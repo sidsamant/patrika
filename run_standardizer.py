@@ -4,9 +4,12 @@ import argparse
 import asyncio
 from typing import Iterable
 
+from env import load_local_env
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
+load_local_env()
 
 from agents.hoarder.sources.filesource.agent import filesource_agent
 from agents.screener.agent_hosted import file_metadata_screening_agent

@@ -1,0 +1,44 @@
+{
+  "files": [
+    {
+      "path": "D:\\ai\\adk\\demofiles\\commands_draft.md",
+      "name": "commands_draft.md",
+      "createdAt": null,
+      "modifiedAt": null,
+      "isSelected": false,
+      "rejectionReason": "File is a draft."
+    },
+    {
+      "path": "D:\\ai\\adk\\demofiles\\seed_fund_scheme.pdf",
+      "name": "seed_fund_scheme.pdf",
+      "createdAt": null,
+      "modifiedAt": null,
+      "isSelected": true,
+      "rejectionReason": null
+    },
+    {
+      "path": "D:\\ai\\adk\\demofiles\\somefile_v1.pdf",
+      "name": "somefile_v1.pdf",
+      "createdAt": null,
+      "modifiedAt": null,
+      "isSelected": false,
+      "rejectionReason": "There are newer versions of this file."
+    },
+    {
+      "path": "D:\\ai\\adk\\demofiles\\somefile_v2.pdf",
+      "name": "somefile_v2.pdf",
+      "createdAt": null,
+      "modifiedAt": null,
+      "isSelected": true,
+      "rejectionReason": null
+    },
+    {
+      "path": "D:\\ai\\adk\\demofiles\\with_text.pdf",
+      "name": "with_text.pdf",
+      "createdAt": null,
+      "modifiedAt": null,
+      "isSelected": true,
+      "rejectionReason": null
+    }
+  ]
+}

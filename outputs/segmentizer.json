@@ -1,0 +1,54 @@
+{
+  "rowSource": "D:\\ai\\newsletter_adk\\data\\standardizer.db",
+  "segmentConfigPath": "d:\\ai\\newsletter_adk\\agents\\segmentizer\\config.json",
+  "totalRows": 9,
+  "matchedRows": 1,
+  "mappings": [
+    {
+      "doc_id": 9,
+      "source_path": "D:\\ai\\adk\\demofiles\\with_text.pdf",
+      "matches": [
+        {
+          "segment": "Security",
+          "score": 0.7,
+          "min_score": 0.2,
+          "matched_rule_count": 1,
+          "matched_rules": [
+            {
+              "index": 0,
+              "field": "text",
+              "op": "contains_any",
+              "value": [
+                "vulnerability",
+                "cve",
+                "breach",
+                "security advisory"
+              ],
+              "weight": 0.7
+            }
+          ]
+        },
+        {
+          "segment": "Engineering",
+          "score": 0.6,
+          "min_score": 0.25,
+          "matched_rule_count": 1,
+          "matched_rules": [
+            {
+              "index": 0,
+              "field": "text",
+              "op": "contains_any",
+              "value": [
+                "release notes",
+                "api",
+                "incident",
+                "architecture"
+              ],
+              "weight": 0.6
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

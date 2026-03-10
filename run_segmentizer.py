@@ -10,11 +10,11 @@ from google.genai import types
 
 load_local_env()
 
-from agent import root_agent
+from agents.segmentizer.agent import segmentizer_agent
 
-APP_NAME = "newsletter_adk"
+APP_NAME = "segmentizer"
 USER_ID = "local_user"
-SESSION_ID = "pipeline_session"
+SESSION_ID = "segmentizer_session"
 
 
 def _iter_text_parts(parts: Iterable[object]) -> Iterable[str]:
@@ -28,11 +28,8 @@ async def main() -> None:
     session_service = InMemorySessionService()
     await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
 
-    runner = Runner(agent=root_agent, app_name=APP_NAME, session_service=session_service)
-    prompt = types.Content(
-        role="user",
-        parts=[types.Part(text="Run hoarder, screener, standardizer, and segmentizer in sequence")],
-    )
+    runner = Runner(agent=segmentizer_agent, app_name=APP_NAME, session_service=session_service)
+    prompt = types.Content(role="user", parts=[types.Part(text="Map standardized documents to configured newsletter segments")])
 
     async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=prompt):
         content = getattr(event, "content", None)

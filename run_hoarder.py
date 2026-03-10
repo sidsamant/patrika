@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 from typing import Iterable
 
+from env import load_local_env
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
+load_local_env()
 
 from agents.hoarder.agent import root_agent
 

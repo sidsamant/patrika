@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -12,6 +14,7 @@ from .util import reviewer_instruction_provider, simple_before_model_modifier
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCREENER_OUTPUT_PATH = PROJECT_ROOT / "outputs" / "screener.json"
+LLM_REQUEST_DELAY_SECONDS = max(float(os.getenv("SCREENER_LLM_DELAY_SECONDS", "2.0")), 0.0)
 
 import logging
 logging.basicConfig(
@@ -58,6 +61,12 @@ class FileMetadataScreeningAgent(BaseAgent):
             return
 
         latest_payload: str | None = None
+        if LLM_REQUEST_DELAY_SECONDS > 0:
+            logging.getLogger(__name__).debug(
+                "Sleeping %.2f seconds before hosted screener LLM call.", LLM_REQUEST_DELAY_SECONDS
+            )
+            await asyncio.sleep(LLM_REQUEST_DELAY_SECONDS)
+
         async for event in self._reviewer.run_async(ctx):
             content = getattr(event, "content", None)
             parts = getattr(content, "parts", None) if content else None

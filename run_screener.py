@@ -5,9 +5,12 @@ import asyncio
 import json
 from typing import Iterable
 
+from env import load_local_env
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
+load_local_env()
 
 from agents.hoarder.sources.filesource.agent import filesource_agent
 from agents.screener.agent import file_metadata_screening_agent as ollama_screener_agent
