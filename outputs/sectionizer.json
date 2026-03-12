@@ -1,0 +1,255 @@
+﻿{
+  "rowSource": "D:\\ai\\newsletter_adk\\data\\standardizer.db",
+  "sectionConfigPath": "D:\\ai\\newsletter_adk\\agents\\sectionizer\\config.json",
+  "promptTemplatePath": "D:\\ai\\newsletter_adk\\agents\\sectionizer\\prompt_template.md",
+  "totalRows": 1,
+  "matchedRows": 1,
+  "mappings": [
+    {
+      "doc_id": 9,
+      "source_path": "D:\\ai\\adk\\demofiles\\with_text.pdf",
+      "document_summary": "This document is a Draft Prospectus from Edelweiss Financial Services Limited dated February 18, 2026, detailing a public issue of Secured Redeemable Non-Convertible Debentures (NCDs) for up to \u20b93,500 million. It provides extensive financial information, outlines various risk factors associated with its diversified financial services businesses, and includes details on its operations, management, and regulatory compliance.",
+      "section_evaluations": [
+        {
+          "section": "Executive",
+          "score": 0.5,
+          "min_score": 0.25,
+          "matched_rule_count": 1,
+          "rule_scores": [
+            {
+              "index": 0,
+              "rule": "{\"field\": \"metadata.extracted.title\", \"op\": \"contains\", \"value\": \"executive\", \"weight\": 0.5}",
+              "score": 0.0,
+              "reason": "The document metadata's extracted title is null and does not contain the term 'executive'.",
+              "fact": ""
+            },
+            {
+              "index": 1,
+              "rule": "{\"field\": \"text\", \"op\": \"contains\", \"value\": \"quarterly results\", \"weight\": 0.5}",
+              "score": 1.0,
+              "reason": "The document explicitly mentions 'Q3 2026 Unaudited Consolidated Financial Results' and 'HY 2026 Unaudited Consolidated Financial Results'.",
+              "fact": "Q3 2026 Unaudited Consolidated Financial Results; HY 2026 Unaudited Consolidated Financial Results"
+            }
+          ],
+          "newsletter_title": "Edelweiss Financial Services: Q3 & HY Fiscal 2026 Consolidated Financial Results",
+          "summary": "The document includes unaudited consolidated financial results for Q3 Fiscal 2026 and HY Fiscal 2026, providing key financial parameters for Edelweiss Financial Services Limited, highlighting its profit and total income.",
+          "summary_facts": [
+            "The consolidated profit attributable to owners of the Issuer was \u20b9 4,590.34 million for the nine-month period ended December 31, 2025.",
+            "The total consolidated income of the Issuer was \u20b9 88,958.70 million for the nine-month period ended December 31, 2025.",
+            "The document presents key operational and financial parameters on a consolidated basis for the half year and nine months ended September 30, 2025, and December 31, 2025, respectively."
+          ],
+          "raw_llm_score": 0.5,
+          "passes_threshold": true
+        },
+        {
+          "section": "Engineering",
+          "score": 0.3,
+          "min_score": 0.25,
+          "matched_rule_count": 1,
+          "rule_scores": [
+            {
+              "index": 0,
+              "rule": "{\"field\": \"text\", \"op\": \"contains_any\", \"value\": [\"release notes\", \"api\", \"incident\", \"architecture\"], \"weight\": 0.6}",
+              "score": 0.6,
+              "reason": "The document contains the term 'api' (Application Programming Interface) in the 'Technical and Industry Related Terms' section, which is a direct match. While 'incident' and 'architecture' are present, they are not in a software engineering context.",
+              "fact": "API Application Programming Interface; cloud native general insurance platform; open API stack; Operational risk incidents"
+            },
+            {
+              "index": 1,
+              "rule": "{\"field\": \"metadata.source.path\", \"op\": \"contains\", \"value\": \"engineering\", \"weight\": 0.4}",
+              "score": 0.0,
+              "reason": "The document's source path 'D:\\ai\\adk\\demofiles\\with_text.pdf' does not contain the term 'engineering'.",
+              "fact": ""
+            }
+          ],
+          "newsletter_title": "Technology Adoption and API Usage at Edelweiss Financial Services",
+          "summary": "The document highlights the company's use of technology, including references to 'API' (Application Programming Interface) and its 'cloud native general insurance platform', indicating a focus on technological infrastructure and digital solutions.",
+          "summary_facts": [
+            "The term 'API' (Application Programming Interface) is defined in the document's technical terms.",
+            "Zuno General Insurance Limited, a subsidiary, is an early adopter of a 'cloud native general insurance platform' and uses an 'open API stack' for integration.",
+            "The company emphasizes 'high technology adoption in our businesses' and 'effective use of technology' as a strength."
+          ],
+          "raw_llm_score": 0.36,
+          "passes_threshold": true
+        },
+        {
+          "section": "Security",
+          "score": 0.35,
+          "min_score": 0.2,
+          "matched_rule_count": 1,
+          "rule_scores": [
+            {
+              "index": 0,
+              "rule": "{\"field\": \"text\", \"op\": \"contains_any\", \"value\": [\"vulnerability\", \"cve\", \"breach\", \"security advisory\"], \"weight\": 0.7}",
+              "score": 0.7,
+              "reason": "The document explicitly mentions 'security breaches' and 'cyber-attacks' in the 'Risk Factors' section. The term 'breach' is a direct match.",
+              "fact": "We face the threat of fraud and cyber-attacks, such as hacking, phishing, trojans and other threats, attempting to exploit our network to disrupt services to customers and/or theft of sensitive internal company data or customer information. This may cause damage to our reputation and adversely impact our business and financial results. A significant system breakdown or system failure caused due to intentional or unintentional acts would have an adverse impact on our revenue-generating activities and lead to financial loss. It may also impact our customers\u2019 loyalty and satisfaction. Although we have established a geographically remote disaster recovery site to support critical applications, it is possible the disaster recovery site may also fail or it may take considerable time to make the system fully operational and achieve complete business resumption using the alternate site. Therefore, in such a scenario, where the primary site is completely unavailable, there may be significant disruption to our operations, which would materially adversely affect our reputation and financial condition. There is also the risk of our customers blaming us and terminating their accounts with us for a cyber-incident that might have occurred on their own system or with that of an unrelated third party. Any cyber-security breach could also subject us to additional regulatory scrutiny and expose us to civil litigation and related financial liability."
+            },
+            {
+              "index": 1,
+              "rule": "{\"field\": \"metadata.source.name\", \"op\": \"regex\", \"value\": \"(?i)security|advisory\", \"weight\": 0.3}",
+              "score": 0.0,
+              "reason": "The document's source name 'with_text.pdf' does not match the regex for 'security' or 'advisory'.",
+              "fact": ""
+            }
+          ],
+          "newsletter_title": "Cybersecurity Risks and Measures at Edelweiss Financial Services",
+          "summary": "The document addresses significant security concerns, including the threat of cyber-attacks, fraud, and potential security breaches, and outlines the company's efforts to mitigate these risks within its financial operations.",
+          "summary_facts": [
+            "The company faces the threat of 'fraud and cyber-attacks, such as hacking, phishing, trojans and other threats'.",
+            "'Security breaches' could result in the unauthorized release, misuse, or loss of sensitive information.",
+            "The use of cloud environments introduces the possibility of new 'security breaches' for the company."
+          ],
+          "raw_llm_score": 0.49,
+          "passes_threshold": true
+        },
+        {
+          "section": "ISSUE RELATED INFORMATION",
+          "score": 1.0,
+          "min_score": 0.2,
+          "matched_rule_count": 1,
+          "rule_scores": [
+            {
+              "index": 0,
+              "rule": "A section in the document that contains infromation about Non Convertible Debenture issue price",
+              "score": 1.0,
+              "reason": "The document explicitly states the 'Issue Price \u20b9 1,000 per NCD' in the 'ISSUE STRUCTURE' section, which is part of 'SECTION VII \u2013 ISSUE RELATED INFORMATION'.",
+              "fact": "PUBLIC ISSUE BY THE ISSUER OF 35,00,000 SECURED REDEEMABLE NON-CONVERTIBLE DEBENTURES OF FACE VALUE OF \u20b9 1,000 EACH (\u201cNCDS\u201d OR \u201cDEBENTURES\u201d) FOR AN AMOUNT UP TO \u20b9 1,750 MILLION (\u201cBASE ISSUE SIZE\u201d) WITH A GREEN SHOE OPTION OF UP TO \u20b9 1,750 MILLION, CUMULATIVELY AGGREGATING UP TO \u20b9 3,500 MILLION (\u201cISSUE LIMIT\u201d) HEREINAFTER REFERRED TO AS THE \u201cISSUE\u201d. ... Face Value \u20b9 1,000 per NCD; Issue Price \u20b9 1,000 per NCD"
+            }
+          ],
+          "newsletter_title": "Edelweiss Financial Services Announces Public Issue of Non-Convertible Debentures",
+          "summary": "The document, a draft prospectus, details a public issue of Secured Redeemable Non-Convertible Debentures (NCDs) by Edelweiss Financial Services Limited, specifying the face value, issue price, and total issue size.",
+          "summary_facts": [
+            "The public issue is for 3,500,000 Secured Redeemable Non-Convertible Debentures.",
+            "The face value of each NCD is \u20b9 1,000.",
+            "The issue price for each NCD is \u20b9 1,000.",
+            "The total issue limit for the NCDs is cumulatively aggregating up to \u20b9 3,500 million."
+          ],
+          "raw_llm_score": 1.0,
+          "passes_threshold": true
+        }
+      ],
+      "matches": [
+        {
+          "section": "ISSUE RELATED INFORMATION",
+          "score": 1.0,
+          "min_score": 0.2,
+          "matched_rule_count": 1,
+          "rule_scores": [
+            {
+              "index": 0,
+              "rule": "A section in the document that contains infromation about Non Convertible Debenture issue price",
+              "score": 1.0,
+              "reason": "The document explicitly states the 'Issue Price \u20b9 1,000 per NCD' in the 'ISSUE STRUCTURE' section, which is part of 'SECTION VII \u2013 ISSUE RELATED INFORMATION'.",
+              "fact": "PUBLIC ISSUE BY THE ISSUER OF 35,00,000 SECURED REDEEMABLE NON-CONVERTIBLE DEBENTURES OF FACE VALUE OF \u20b9 1,000 EACH (\u201cNCDS\u201d OR \u201cDEBENTURES\u201d) FOR AN AMOUNT UP TO \u20b9 1,750 MILLION (\u201cBASE ISSUE SIZE\u201d) WITH A GREEN SHOE OPTION OF UP TO \u20b9 1,750 MILLION, CUMULATIVELY AGGREGATING UP TO \u20b9 3,500 MILLION (\u201cISSUE LIMIT\u201d) HEREINAFTER REFERRED TO AS THE \u201cISSUE\u201d. ... Face Value \u20b9 1,000 per NCD; Issue Price \u20b9 1,000 per NCD"
+            }
+          ],
+          "newsletter_title": "Edelweiss Financial Services Announces Public Issue of Non-Convertible Debentures",
+          "summary": "The document, a draft prospectus, details a public issue of Secured Redeemable Non-Convertible Debentures (NCDs) by Edelweiss Financial Services Limited, specifying the face value, issue price, and total issue size.",
+          "summary_facts": [
+            "The public issue is for 3,500,000 Secured Redeemable Non-Convertible Debentures.",
+            "The face value of each NCD is \u20b9 1,000.",
+            "The issue price for each NCD is \u20b9 1,000.",
+            "The total issue limit for the NCDs is cumulatively aggregating up to \u20b9 3,500 million."
+          ],
+          "raw_llm_score": 1.0,
+          "passes_threshold": true
+        },
+        {
+          "section": "Executive",
+          "score": 0.5,
+          "min_score": 0.25,
+          "matched_rule_count": 1,
+          "rule_scores": [
+            {
+              "index": 0,
+              "rule": "{\"field\": \"metadata.extracted.title\", \"op\": \"contains\", \"value\": \"executive\", \"weight\": 0.5}",
+              "score": 0.0,
+              "reason": "The document metadata's extracted title is null and does not contain the term 'executive'.",
+              "fact": ""
+            },
+            {
+              "index": 1,
+              "rule": "{\"field\": \"text\", \"op\": \"contains\", \"value\": \"quarterly results\", \"weight\": 0.5}",
+              "score": 1.0,
+              "reason": "The document explicitly mentions 'Q3 2026 Unaudited Consolidated Financial Results' and 'HY 2026 Unaudited Consolidated Financial Results'.",
+              "fact": "Q3 2026 Unaudited Consolidated Financial Results; HY 2026 Unaudited Consolidated Financial Results"
+            }
+          ],
+          "newsletter_title": "Edelweiss Financial Services: Q3 & HY Fiscal 2026 Consolidated Financial Results",
+          "summary": "The document includes unaudited consolidated financial results for Q3 Fiscal 2026 and HY Fiscal 2026, providing key financial parameters for Edelweiss Financial Services Limited, highlighting its profit and total income.",
+          "summary_facts": [
+            "The consolidated profit attributable to owners of the Issuer was \u20b9 4,590.34 million for the nine-month period ended December 31, 2025.",
+            "The total consolidated income of the Issuer was \u20b9 88,958.70 million for the nine-month period ended December 31, 2025.",
+            "The document presents key operational and financial parameters on a consolidated basis for the half year and nine months ended September 30, 2025, and December 31, 2025, respectively."
+          ],
+          "raw_llm_score": 0.5,
+          "passes_threshold": true
+        },
+        {
+          "section": "Security",
+          "score": 0.35,
+          "min_score": 0.2,
+          "matched_rule_count": 1,
+          "rule_scores": [
+            {
+              "index": 0,
+              "rule": "{\"field\": \"text\", \"op\": \"contains_any\", \"value\": [\"vulnerability\", \"cve\", \"breach\", \"security advisory\"], \"weight\": 0.7}",
+              "score": 0.7,
+              "reason": "The document explicitly mentions 'security breaches' and 'cyber-attacks' in the 'Risk Factors' section. The term 'breach' is a direct match.",
+              "fact": "We face the threat of fraud and cyber-attacks, such as hacking, phishing, trojans and other threats, attempting to exploit our network to disrupt services to customers and/or theft of sensitive internal company data or customer information. This may cause damage to our reputation and adversely impact our business and financial results. A significant system breakdown or system failure caused due to intentional or unintentional acts would have an adverse impact on our revenue-generating activities and lead to financial loss. It may also impact our customers\u2019 loyalty and satisfaction. Although we have established a geographically remote disaster recovery site to support critical applications, it is possible the disaster recovery site may also fail or it may take considerable time to make the system fully operational and achieve complete business resumption using the alternate site. Therefore, in such a scenario, where the primary site is completely unavailable, there may be significant disruption to our operations, which would materially adversely affect our reputation and financial condition. There is also the risk of our customers blaming us and terminating their accounts with us for a cyber-incident that might have occurred on their own system or with that of an unrelated third party. Any cyber-security breach could also subject us to additional regulatory scrutiny and expose us to civil litigation and related financial liability."
+            },
+            {
+              "index": 1,
+              "rule": "{\"field\": \"metadata.source.name\", \"op\": \"regex\", \"value\": \"(?i)security|advisory\", \"weight\": 0.3}",
+              "score": 0.0,
+              "reason": "The document's source name 'with_text.pdf' does not match the regex for 'security' or 'advisory'.",
+              "fact": ""
+            }
+          ],
+          "newsletter_title": "Cybersecurity Risks and Measures at Edelweiss Financial Services",
+          "summary": "The document addresses significant security concerns, including the threat of cyber-attacks, fraud, and potential security breaches, and outlines the company's efforts to mitigate these risks within its financial operations.",
+          "summary_facts": [
+            "The company faces the threat of 'fraud and cyber-attacks, such as hacking, phishing, trojans and other threats'.",
+            "'Security breaches' could result in the unauthorized release, misuse, or loss of sensitive information.",
+            "The use of cloud environments introduces the possibility of new 'security breaches' for the company."
+          ],
+          "raw_llm_score": 0.49,
+          "passes_threshold": true
+        },
+        {
+          "section": "Engineering",
+          "score": 0.3,
+          "min_score": 0.25,
+          "matched_rule_count": 1,
+          "rule_scores": [
+            {
+              "index": 0,
+              "rule": "{\"field\": \"text\", \"op\": \"contains_any\", \"value\": [\"release notes\", \"api\", \"incident\", \"architecture\"], \"weight\": 0.6}",
+              "score": 0.6,
+              "reason": "The document contains the term 'api' (Application Programming Interface) in the 'Technical and Industry Related Terms' section, which is a direct match. While 'incident' and 'architecture' are present, they are not in a software engineering context.",
+              "fact": "API Application Programming Interface; cloud native general insurance platform; open API stack; Operational risk incidents"
+            },
+            {
+              "index": 1,
+              "rule": "{\"field\": \"metadata.source.path\", \"op\": \"contains\", \"value\": \"engineering\", \"weight\": 0.4}",
+              "score": 0.0,
+              "reason": "The document's source path 'D:\\ai\\adk\\demofiles\\with_text.pdf' does not contain the term 'engineering'.",
+              "fact": ""
+            }
+          ],
+          "newsletter_title": "Technology Adoption and API Usage at Edelweiss Financial Services",
+          "summary": "The document highlights the company's use of technology, including references to 'API' (Application Programming Interface) and its 'cloud native general insurance platform', indicating a focus on technological infrastructure and digital solutions.",
+          "summary_facts": [
+            "The term 'API' (Application Programming Interface) is defined in the document's technical terms.",
+            "Zuno General Insurance Limited, a subsidiary, is an early adopter of a 'cloud native general insurance platform' and uses an 'open API stack' for integration.",
+            "The company emphasizes 'high technology adoption in our businesses' and 'effective use of technology' as a strength."
+          ],
+          "raw_llm_score": 0.36,
+          "passes_threshold": true
+        }
+      ]
+    }
+  ]
+}
+

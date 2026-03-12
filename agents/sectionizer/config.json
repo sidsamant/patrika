@@ -1,5 +1,5 @@
 {
-  "segments": [
+  "sections": [
     {
       "name": "Executive",
       "min_score": 0.25,
@@ -63,6 +63,11 @@
           "weight": 0.3
         }
       ]
+    },
+    {
+      "name": "ISSUE RELATED INFORMATION",
+      "min_score": 0.2,
+      "rules": "A section in the document that contains infromation about Non Convertible Debenture issue price"
     }
   ]
 }

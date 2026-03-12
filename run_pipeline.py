@@ -31,7 +31,7 @@ async def main() -> None:
     runner = Runner(agent=root_agent, app_name=APP_NAME, session_service=session_service)
     prompt = types.Content(
         role="user",
-        parts=[types.Part(text="Run hoarder, screener, standardizer, and segmentizer in sequence")],
+        parts=[types.Part(text="Run hoarder, screener, standardizer, and sectionizer in sequence")],
     )
 
     async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=prompt):

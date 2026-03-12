@@ -1,35 +1,35 @@
-# Segmentizer Technical Notes
+# Sectionizer Technical Notes
 
 ## Overview
 
-`agents/segmentizer/agent.py` uses an internal Google ADK `LlmAgent` backed by Gemini to score each standardized document against the configured newsletter segments. The Python code handles data loading, prompt rendering, response normalization, score thresholding, and persistence, while the segment/rule evaluation itself is delegated to the ADK LLM flow. Prompt instructions live in `prompt_template.md` instead of being embedded in code.
+`agents/sectionizer/agent.py` uses an internal Google ADK `LlmAgent` backed by Gemini to score each standardized document against the configured newsletter sections. The Python code handles data loading, prompt rendering, response normalization, score thresholding, and persistence, while the section/rule evaluation itself is delegated to the ADK LLM flow. Prompt instructions live in `prompt_template.md` instead of being embedded in code.
 
 ## Runtime Flow
 
-1. The ADK runner invokes `SegmentizerAgent._run_async_impl`.
+1. The ADK runner invokes `SectionizerAgent._run_async_impl`.
 2. The agent logs the incoming ADK user message from `ctx.user_content` for debugging.
-3. `_load_config()` reads `agents/segmentizer/config.json` and parses the top-level JSON object.
-4. `_load_prompt_template()` reads `agents/segmentizer/prompt_template.md`.
+3. `_load_config()` reads `agents/sectionizer/config.json` and parses the top-level JSON object.
+4. `_load_prompt_template()` reads `agents/sectionizer/prompt_template.md`.
 5. `_load_standardized_rows()` resolves input rows from `data/standardizer.db`, table `documents`. If the database is missing or empty, the agent falls back to an empty list.
 6. For each document row, `_render_prompt()` injects:
    - the runner prompt
    - the full standardized document JSON
    - the raw document text
-   - the configured segment definitions, including plain-text rules
-7. `segmentizer_instruction_provider()` renders the full prompt template for the current document.
-8. `segmentizer_before_model_callback()` logs the rendered prompt before the ADK model call.
-9. Before each document after the first, the agent pauses for `SEGMENTIZER_LLM_DELAY_SECONDS` seconds (default `2.0`) to reduce rate-limit pressure.
+   - the configured section definitions, including plain-text rules
+7. `sectionizer_instruction_provider()` renders the full prompt template for the current document.
+8. `sectionizer_before_model_callback()` logs the rendered prompt before the ADK model call.
+9. Before each document after the first, the agent pauses for `SECTIONIZER_LLM_DELAY_SECONDS` seconds (default `2.0`) to reduce rate-limit pressure.
 10. The internal `LlmAgent` calls Gemini with `response_mime_type="application/json"`.
-11. Gemini returns per-segment output including:
+11. Gemini returns per-section output including:
    - per-rule scores
    - a newsletter title
    - a factual summary
    - summary facts grounded in the document
-12. `_normalize_rule_scores()` and `_normalize_segment_result()` merge the Gemini output back with the configured plain-text rules and compute the segment score as the average of returned per-rule scores.
-13. Segments whose computed score is at least `min_score` are copied into `matches`.
+12. `_normalize_rule_scores()` and `_normalize_section_result()` merge the Gemini output back with the configured plain-text rules and compute the section score as the average of returned per-rule scores.
+13. Sections whose computed score is at least `min_score` are copied into `matches`.
 14. The agent persists the final payload to:
-    - `outputs/segmentizer.json`
-    - `ctx.session.state["segment_mappings"]`
+    - `outputs/sectionizer.json`
+    - `ctx.session.state["section_mappings"]`
 15. The same payload is emitted as the ADK event response.
 
 ## Input Model
@@ -57,9 +57,9 @@ Each standardized row is expected to look roughly like this:
 
 Rows are loaded from SQLite only.
 
-## Segment Configuration
+## Section Configuration
 
-`config.json` contains a `segments` array. Each segment needs:
+`config.json` contains a `sections` array. Each section needs:
 
 ```json
 {
@@ -78,11 +78,11 @@ Rules are plain text instructions for the LLM. They are not parsed as structured
 
 `prompt_template.md` is the source of truth for LLM instructions. It tells Gemini to:
 
-- evaluate every configured segment
+- evaluate every configured section
 - interpret the configured rules as plain-text instructions
 - return a score for every rule
-- generate a newsletter title per segment
-- generate a short factual summary per segment
+- generate a newsletter title per section
+- generate a short factual summary per section
 - provide `summary_facts` grounded strictly in the document
 - return JSON only
 
@@ -108,7 +108,7 @@ The output file contains:
 ```json
 {
   "rowSource": "...",
-  "segmentConfigPath": "...",
+  "sectionConfigPath": "...",
   "promptTemplatePath": "...",
   "totalRows": 10,
   "matchedRows": 4,
@@ -117,9 +117,9 @@ The output file contains:
       "doc_id": 1,
       "source_path": "...",
       "document_summary": "...",
-      "segment_evaluations": [
+      "section_evaluations": [
         {
-          "segment": "Engineering",
+          "section": "Engineering",
           "score": 0.6,
           "newsletter_title": "...",
           "summary": "...",
@@ -137,7 +137,7 @@ The output file contains:
       ],
       "matches": [
         {
-          "segment": "Engineering",
+          "section": "Engineering",
           "score": 0.6,
           "min_score": 0.25,
           "matched_rule_count": 1,
@@ -157,12 +157,12 @@ The output file contains:
 The module now enables debug logging and records:
 
 - the incoming runner prompt from `ctx.user_content`
-- the loaded segment configuration
+- the loaded section configuration
 - the prompt template path
 - the full rendered Gemini prompt
 - the raw Gemini response
 - the resolved row source and row count
-- each document's passing segment count
+- each document's passing section count
 - the final persisted output payload
 
-This gives you a full trace of the LLM inputs and outputs used to classify documents into newsletter segments.
+This gives you a full trace of the LLM inputs and outputs used to classify documents into newsletter sections.

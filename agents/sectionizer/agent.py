@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
+from functools import lru_cache
 import json
 import logging
 import os
@@ -8,6 +10,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
+from google import genai
+from dotenv import load_dotenv
 from google.adk.agents import BaseAgent, LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
@@ -16,19 +20,107 @@ from google.adk.events import Event
 from google.adk.models import LlmRequest, LlmResponse
 from google.genai import types
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ENV_PATH = PROJECT_ROOT / ".env"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+LOGS_DIR = PROJECT_ROOT / ".logs"
+RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
+SECTIONIZER_LOG_PATH = LOGS_DIR / f"sectionizer-{RUN_TIMESTAMP}.debug.log"
 STANDARDIZER_DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
-SEGMENTIZER_OUTPUT_PATH = OUTPUTS_DIR / "segmentizer.json"
+SECTIONIZER_OUTPUT_PATH = OUTPUTS_DIR / "sectionizer.json"
 CONFIG_PATH = Path(__file__).with_name("config.json")
 PROMPT_TEMPLATE_PATH = Path(__file__).with_name("prompt_template.md")
-LLM_REQUEST_DELAY_SECONDS = max(float(os.getenv("SEGMENTIZER_LLM_DELAY_SECONDS", "2.0")), 0.0)
+
+load_dotenv(ENV_PATH)
+
+LLM_REQUEST_DELAY_SECONDS = max(float(os.getenv("SECTIONIZER_LLM_DELAY_SECONDS", "2.0")), 0.0)
+
+
+def _configure_logging() -> logging.Logger:
+    """Attach console and file handlers for sectionizer debug logs."""
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    if not any(isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler) for handler in root_logger.handlers):
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(logging.DEBUG)
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    resolved_log_path = SECTIONIZER_LOG_PATH.resolve()
+    if not any(
+        isinstance(handler, logging.FileHandler) and Path(getattr(handler, "baseFilename", "")).resolve() == resolved_log_path
+        for handler in root_logger.handlers
+    ):
+        file_handler = logging.FileHandler(resolved_log_path, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+    return logging.getLogger(__name__)
+
+
+logger = _configure_logging()
+
+
+def _mask_secret(value: str, *, visible: int = 4) -> str:
+    """Return a masked representation of a secret for debug logging."""
+    if len(value) <= visible * 2:
+        return "*" * len(value)
+    return f"{value[:visible]}...{value[-visible:]}"
+
+
+def _get_llm_token_display() -> str:
+    """Return a safe summary of the configured LLM credential."""
+    for env_name in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GENAI_API_KEY"):
+        token = os.getenv(env_name)
+        if token:
+            return f"{env_name}={_mask_secret(token)}"
+    return "no LLM token env var found"
+
+
+@lru_cache(maxsize=1)
+def _get_genai_client() -> genai.Client:
+    """Create a Gemini client using the configured API credentials."""
+    for env_name in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GENAI_API_KEY"):
+        api_key = os.getenv(env_name)
+        if api_key:
+            return genai.Client(api_key=api_key)
+    return genai.Client()
+
+
+def _count_token_parts(runtime_instruction: str, llm_request: LlmRequest) -> tuple[int | None, int | None, int | None]:
+    """Count prompt tokens for the upcoming Gemini request using Gemini API-supported inputs."""
+    model_name = llm_request.model or os.getenv("SECTIONIZER_GEMINI_MODEL", "gemini-2.5-flash-lite")
+    try:
+        instruction_response = _get_genai_client().models.count_tokens(
+            model=model_name,
+            contents=runtime_instruction,
+        )
+    except Exception:
+        logger.exception("Failed counting system-instruction tokens for model %s", model_name)
+        return None, None, None
+
+    try:
+        contents_response = _get_genai_client().models.count_tokens(
+            model=model_name,
+            contents=llm_request.contents,
+        )
+    except Exception:
+        logger.exception("Failed counting request-content tokens for model %s", model_name)
+        return (
+            int(getattr(instruction_response, "total_tokens", 0)) if isinstance(getattr(instruction_response, "total_tokens", None), int) else None,
+            None,
+            None,
+        )
+
+    instruction_tokens = getattr(instruction_response, "total_tokens", None)
+    content_tokens = getattr(contents_response, "total_tokens", None)
+    if not isinstance(instruction_tokens, int) or not isinstance(content_tokens, int):
+        return None, None, None
+    return instruction_tokens, content_tokens, instruction_tokens + content_tokens
 
 
 def _state_get(context: Any, key: str) -> Any:
@@ -72,9 +164,9 @@ def _parse_json_object(raw_text: str | None) -> dict[str, Any]:
 
 
 def _load_config() -> dict[str, Any]:
-    """Load the segmentizer configuration file from disk."""
+    """Load the sectionizer configuration file from disk."""
     config = _parse_json_object(_read_text_if_exists(CONFIG_PATH))
-    logger.debug("Loaded segmentizer config from %s: %s", CONFIG_PATH, json.dumps(config, ensure_ascii=True))
+    logger.debug("Loaded sectionizer config from %s: %s", CONFIG_PATH, json.dumps(config, ensure_ascii=True))
     return config
 
 
@@ -108,6 +200,8 @@ def _load_rows_from_db() -> list[dict[str, Any]]:
                   created_at,
                   persisted_at
                 FROM documents
+                WHERE text_content IS NOT NULL
+                  AND TRIM(text_content) <> ''
                 ORDER BY doc_id ASC
                 """
             )
@@ -182,17 +276,17 @@ def _normalize_plaintext_rules(raw_rules: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _normalize_segment_definition(raw_segment: Any) -> dict[str, Any] | None:
-    """Normalize one configured segment while preserving plain-text rules for the LLM."""
-    if not isinstance(raw_segment, dict):
+def _normalize_section_definition(raw_section: Any) -> dict[str, Any] | None:
+    """Normalize one configured section while preserving plain-text rules for the LLM."""
+    if not isinstance(raw_section, dict):
         return None
 
-    name = str(raw_segment.get("name") or "").strip()
+    name = str(raw_section.get("name") or "").strip()
     if not name:
         return None
 
-    min_score = _to_score(raw_segment.get("min_score"))
-    rules = _normalize_plaintext_rules(raw_segment.get("rules"))
+    min_score = _to_score(raw_section.get("min_score"))
+    rules = _normalize_plaintext_rules(raw_section.get("rules"))
     return {
         "name": name,
         "min_score": min_score,
@@ -200,15 +294,15 @@ def _normalize_segment_definition(raw_segment: Any) -> dict[str, Any] | None:
     }
 
 
-def _normalize_segment_definitions(raw_segments: Any) -> list[dict[str, Any]]:
-    """Normalize configured segments for downstream prompt rendering and scoring."""
-    if not isinstance(raw_segments, list):
+def _normalize_section_definitions(raw_sections: Any) -> list[dict[str, Any]]:
+    """Normalize configured sections for downstream prompt rendering and scoring."""
+    if not isinstance(raw_sections, list):
         return []
     normalized: list[dict[str, Any]] = []
-    for raw_segment in raw_segments:
-        segment = _normalize_segment_definition(raw_segment)
-        if segment is not None:
-            normalized.append(segment)
+    for raw_section in raw_sections:
+        section = _normalize_section_definition(raw_section)
+        if section is not None:
+            normalized.append(section)
     return normalized
 
 
@@ -236,47 +330,56 @@ def _render_prompt(
     *,
     user_prompt: str,
     row: dict[str, Any],
-    segment_defs: list[dict[str, Any]],
+    section_defs: list[dict[str, Any]],
 ) -> str:
-    """Fill the prompt template with the current document and segment definitions."""
+    """Fill the prompt template with the current document and section definitions."""
     rendered = template
     replacements = {
-        "{{USER_PROMPT}}": user_prompt or "Map standardized documents to configured newsletter segments.",
+        "{{USER_PROMPT}}": user_prompt or "Map standardized documents to configured newsletter sections.",
         "{{DOC_ID}}": str(row.get("doc_id", "")),
         "{{DOCUMENT_JSON}}": json.dumps(row, indent=2, ensure_ascii=True, default=str),
+        "{{DOCUMENT_METADATA}}": json.dumps(row.get("metadata") or {}, indent=2, ensure_ascii=True, default=str),
         "{{DOCUMENT_TEXT}}": str(row.get("text") or ""),
-        "{{SEGMENTS_JSON}}": json.dumps(segment_defs, indent=2, ensure_ascii=True, default=str),
+        "{{SEGMENTS_JSON}}": json.dumps(section_defs, indent=2, ensure_ascii=True, default=str),
     }
     for placeholder, value in replacements.items():
         rendered = rendered.replace(placeholder, value)
     return rendered
 
 
-def segmentizer_instruction_provider(context: ReadonlyContext | Any) -> str:
+def sectionizer_instruction_provider(context: ReadonlyContext | Any) -> str:
     """Render the LLM instruction from the external prompt template and current row state."""
-    row = _state_get(context, "segmentizer_current_row")
-    segment_defs = _state_get(context, "segmentizer_segment_defs")
-    user_prompt = str(_state_get(context, "segmentizer_runner_prompt") or "")
+    row = _state_get(context, "sectionizer_current_row")
+    section_defs = _state_get(context, "sectionizer_section_defs")
+    user_prompt = str(_state_get(context, "sectionizer_runner_prompt") or "")
     if not isinstance(row, dict):
         row = {}
-    if not isinstance(segment_defs, list):
-        segment_defs = []
+    if not isinstance(section_defs, list):
+        section_defs = []
     return _render_prompt(
         _load_prompt_template(),
         user_prompt=user_prompt,
         row=row,
-        segment_defs=[item for item in segment_defs if isinstance(item, dict)],
+        section_defs=[item for item in section_defs if isinstance(item, dict)],
     )
 
 
-async def segmentizer_before_model_callback(
+async def sectionizer_before_model_callback(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> LlmResponse | None:
     """Log the rendered prompt and request payload before the ADK LLM call."""
-    runtime_instruction = segmentizer_instruction_provider(callback_context)
-    callback_context.state["segmentizer_runtime_instruction"] = runtime_instruction
-    logger.debug("Segmentizer prompt payload:\n%s", runtime_instruction)
-    logger.debug("Segmentizer llm request contents: %s", getattr(llm_request, "contents", None))
+    runtime_instruction = sectionizer_instruction_provider(callback_context)
+    callback_context.state["sectionizer_runtime_instruction"] = runtime_instruction
+    instruction_tokens, content_tokens, prompt_tokens = _count_token_parts(runtime_instruction, llm_request)
+    logger.debug("Sectionizer LLM token: %s", _get_llm_token_display())
+    logger.debug(
+        "Sectionizer prompt token count: instruction=%s content=%s estimated_total=%s",
+        instruction_tokens if instruction_tokens is not None else "unavailable",
+        content_tokens if content_tokens is not None else "unavailable",
+        prompt_tokens if prompt_tokens is not None else "unavailable",
+    )
+    logger.debug("Sectionizer prompt payload:\n%s", runtime_instruction)
+    logger.debug("Sectionizer llm request contents: %s", getattr(llm_request, "contents", None))
     return None
 
 
@@ -309,7 +412,7 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
 
 
 def _to_score(value: Any) -> float:
-    """Clamp any numeric-like value into the 0..1 range used by segment scoring."""
+    """Clamp any numeric-like value into the 0..1 range used by section scoring."""
     try:
         score = float(value)
     except (TypeError, ValueError):
@@ -326,14 +429,14 @@ def _to_string_list(value: Any) -> list[str]:
     return []
 
 
-def _segment_key(value: Any) -> str:
-    """Normalize segment names for stable matching between config and Gemini output."""
+def _section_key(value: Any) -> str:
+    """Normalize section names for stable matching between config and Gemini output."""
     return str(value or "").strip().lower()
 
 
-def _normalize_rule_scores(raw_segment: dict[str, Any], segment_def: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
+def _normalize_rule_scores(raw_section: dict[str, Any], section_def: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
     """Merge Gemini rule scores with plain-text config rules and compute the final score."""
-    raw_rule_scores = raw_segment.get("rule_scores")
+    raw_rule_scores = raw_section.get("rule_scores")
     indexed_scores = {
         int(item.get("index")): item
         for item in raw_rule_scores
@@ -346,7 +449,7 @@ def _normalize_rule_scores(raw_segment: dict[str, Any], segment_def: dict[str, A
     score_sum = 0.0
     normalized: list[dict[str, Any]] = []
 
-    for idx, rule in enumerate(segment_def.get("rules") or []):
+    for idx, rule in enumerate(section_def.get("rules") or []):
         if not isinstance(rule, dict):
             continue
         raw_rule = indexed_scores.get(idx, {})
@@ -363,21 +466,21 @@ def _normalize_rule_scores(raw_segment: dict[str, Any], segment_def: dict[str, A
             }
         )
 
-    final_score = round(score_sum / total_rules, 4) if total_rules > 0 else _to_score(raw_segment.get("overall_score"))
+    final_score = round(score_sum / total_rules, 4) if total_rules > 0 else _to_score(raw_section.get("overall_score"))
     return normalized, final_score
 
 
-def _normalize_segment_result(segment_def: dict[str, Any], raw_segment: dict[str, Any] | None) -> dict[str, Any]:
-    """Convert one raw Gemini segment evaluation into the persisted output schema."""
-    raw_segment = raw_segment or {}
-    normalized_rule_scores, computed_score = _normalize_rule_scores(raw_segment, segment_def)
-    min_score = _to_score(segment_def.get("min_score"))
-    summary = str(raw_segment.get("summary") or "").strip()
-    newsletter_title = str(raw_segment.get("newsletter_title") or raw_segment.get("title") or "").strip()
-    summary_facts = _to_string_list(raw_segment.get("summary_facts") or raw_segment.get("facts"))
+def _normalize_section_result(section_def: dict[str, Any], raw_section: dict[str, Any] | None) -> dict[str, Any]:
+    """Convert one raw Gemini section evaluation into the persisted output schema."""
+    raw_section = raw_section or {}
+    normalized_rule_scores, computed_score = _normalize_rule_scores(raw_section, section_def)
+    min_score = _to_score(section_def.get("min_score"))
+    summary = str(raw_section.get("summary") or "").strip()
+    newsletter_title = str(raw_section.get("newsletter_title") or raw_section.get("title") or "").strip()
+    summary_facts = _to_string_list(raw_section.get("summary_facts") or raw_section.get("facts"))
 
     return {
-        "segment": str(segment_def.get("name") or "").strip(),
+        "section": str(section_def.get("name") or "").strip(),
         "score": computed_score,
         "min_score": min_score,
         "matched_rule_count": sum(1 for item in normalized_rule_scores if item["score"] > 0),
@@ -385,24 +488,24 @@ def _normalize_segment_result(segment_def: dict[str, Any], raw_segment: dict[str
         "newsletter_title": newsletter_title,
         "summary": summary,
         "summary_facts": summary_facts,
-        "raw_llm_score": _to_score(raw_segment.get("overall_score")),
+        "raw_llm_score": _to_score(raw_section.get("overall_score")),
         "passes_threshold": computed_score >= min_score,
     }
 
 
-def _normalize_llm_result(segment_defs: list[dict[str, Any]], raw_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+def _normalize_llm_result(section_defs: list[dict[str, Any]], raw_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     """Normalize the full Gemini payload into all evaluations, passing matches, and a doc summary."""
-    raw_segments = raw_payload.get("segments")
-    raw_segments_by_name = {
-        _segment_key(item.get("segment") or item.get("name")): item
-        for item in raw_segments
-        if isinstance(raw_segments, list) and isinstance(item, dict)
+    raw_sections = raw_payload.get("sections") or raw_payload.get("segments")
+    raw_sections_by_name = {
+        _section_key(item.get("section") or item.get("segment") or item.get("name")): item
+        for item in raw_sections
+        if isinstance(raw_sections, list) and isinstance(item, dict)
     }
 
     evaluations = [
-        _normalize_segment_result(segment_def, raw_segments_by_name.get(_segment_key(segment_def.get("name"))))
-        for segment_def in segment_defs
-        if isinstance(segment_def, dict)
+        _normalize_section_result(section_def, raw_sections_by_name.get(_section_key(section_def.get("name"))))
+        for section_def in section_defs
+        if isinstance(section_def, dict)
     ]
     matches = [item for item in evaluations if item.get("passes_threshold")]
     matches.sort(key=lambda item: item.get("score", 0), reverse=True)
@@ -422,18 +525,18 @@ def _content_to_text(content: types.Content | None) -> str:
     return "".join((getattr(part, "text", "") or "") for part in parts).strip()
 
 
-class SegmentizerAgent(BaseAgent):
-    """ADK-backed Gemini agent that evaluates documents against configured newsletter segments."""
+class SectionizerAgent(BaseAgent):
+    """ADK-backed Gemini agent that evaluates documents against configured newsletter sections."""
 
     def __init__(self) -> None:
-        """Initialize the segmentizer agent and its internal ADK LLM reviewer."""
+        """Initialize the sectionizer agent and its internal ADK LLM reviewer."""
         reviewer = LlmAgent(
-            name="segmentizer_llm_reviewer",
-            model=os.getenv("SEGMENTIZER_GEMINI_MODEL", "gemini-2.5-flash-lite"),
-            description="Scores documents against configured newsletter segments.",
-            instruction=segmentizer_instruction_provider,
-            before_model_callback=segmentizer_before_model_callback,
-            output_key="segmentizer_llm_output",
+            name="sectionizer_llm_reviewer",
+            model=os.getenv("SECTIONIZER_GEMINI_MODEL", "gemini-2.5-flash-lite"),
+            description="Scores documents against configured newsletter sections.",
+            instruction=sectionizer_instruction_provider,
+            before_model_callback=sectionizer_before_model_callback,
+            output_key="sectionizer_llm_output",
             generate_content_config=types.GenerateContentConfig(
                 temperature=0,
                 response_mime_type="application/json",
@@ -441,8 +544,8 @@ class SegmentizerAgent(BaseAgent):
         )
 
         super().__init__(
-            name="document_segmentizer_agent",
-            description="Uses an internal ADK LLM agent to evaluate standardized documents against configured newsletter segments.",
+            name="document_sectionizer_agent",
+            description="Uses an internal ADK LLM agent to evaluate standardized documents against configured newsletter sections.",
             sub_agents=[reviewer],
         )
         self._reviewer = reviewer
@@ -451,24 +554,24 @@ class SegmentizerAgent(BaseAgent):
         """Evaluate each standardized row with the internal ADK LLM agent and emit persisted mappings."""
         user_prompt = _content_to_text(ctx.user_content)
         if user_prompt:
-            logger.debug("Segmentizer runner prompt: %s", user_prompt)
+            logger.debug("Sectionizer runner prompt: %s", user_prompt)
 
         config = _load_config()
-        segment_defs = _normalize_segment_definitions(config.get("segments"))
-        logger.debug("Segmentizer will evaluate %d segment definitions.", len(segment_defs))
+        section_defs = _normalize_section_definitions(config.get("sections"))
+        logger.debug("Sectionizer will evaluate %d section definitions.", len(section_defs))
 
         standardized_rows, row_source = _load_standardized_rows(ctx)
-        logger.debug("Segmentizer row source: %s (%d rows)", row_source, len(standardized_rows))
+        logger.debug("Sectionizer row source: %s (%d rows)", row_source, len(standardized_rows))
 
         mappings: list[dict[str, Any]] = []
         for row_index, row in enumerate(standardized_rows):
             if row_index > 0 and LLM_REQUEST_DELAY_SECONDS > 0:
-                logger.debug("Sleeping %.2f seconds before next segmentizer LLM call.", LLM_REQUEST_DELAY_SECONDS)
+                logger.debug("Sleeping %.2f seconds before next sectionizer LLM call.", LLM_REQUEST_DELAY_SECONDS)
                 await asyncio.sleep(LLM_REQUEST_DELAY_SECONDS)
 
-            ctx.session.state["segmentizer_current_row"] = row
-            ctx.session.state["segmentizer_segment_defs"] = segment_defs
-            ctx.session.state["segmentizer_runner_prompt"] = user_prompt
+            ctx.session.state["sectionizer_current_row"] = row
+            ctx.session.state["sectionizer_section_defs"] = section_defs
+            ctx.session.state["sectionizer_runner_prompt"] = user_prompt
 
             raw_response = ""
             async for event in self._reviewer.run_async(ctx):
@@ -480,22 +583,22 @@ class SegmentizerAgent(BaseAgent):
                         raw_response = text
 
             if raw_response:
-                logger.debug("Segmentizer raw Gemini response:\n%s", raw_response)
+                logger.debug("Sectionizer raw Gemini response:\n%s", raw_response)
 
             raw_payload = _extract_json_object(raw_response)
-            evaluations, matches, document_summary = _normalize_llm_result(segment_defs, raw_payload)
+            evaluations, matches, document_summary = _normalize_llm_result(section_defs, raw_payload)
             mappings.append(
                 {
                     "doc_id": row.get("doc_id"),
                     "source_path": _path_get(row, "metadata.filesystem.path")
                     or _path_get(row, "metadata.source.path"),
                     "document_summary": document_summary,
-                    "segment_evaluations": evaluations,
+                    "section_evaluations": evaluations,
                     "matches": matches,
                 }
             )
             logger.debug(
-                "Row %s produced %d passing segments out of %d evaluations.",
+                "Row %s produced %d passing sections out of %d evaluations.",
                 row.get("doc_id"),
                 len(matches),
                 len(evaluations),
@@ -505,16 +608,16 @@ class SegmentizerAgent(BaseAgent):
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         output_payload = {
             "rowSource": row_source,
-            "segmentConfigPath": str(CONFIG_PATH),
+            "sectionConfigPath": str(CONFIG_PATH),
             "promptTemplatePath": str(PROMPT_TEMPLATE_PATH),
             "totalRows": len(standardized_rows),
             "matchedRows": matched_rows,
             "mappings": mappings,
         }
-        SEGMENTIZER_OUTPUT_PATH.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
-        ctx.session.state["segment_mappings"] = json.dumps(output_payload)
-        logger.debug("Segmentizer output written to %s", SEGMENTIZER_OUTPUT_PATH)
-        logger.debug("Segmentizer output payload: %s", json.dumps(output_payload, ensure_ascii=True))
+        SECTIONIZER_OUTPUT_PATH.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
+        ctx.session.state["section_mappings"] = json.dumps(output_payload)
+        logger.debug("Sectionizer output written to %s", SECTIONIZER_OUTPUT_PATH)
+        logger.debug("Sectionizer output payload: %s", json.dumps(output_payload, ensure_ascii=True))
 
         yield Event(
             author=self.name,
@@ -523,4 +626,4 @@ class SegmentizerAgent(BaseAgent):
         )
 
 
-segmentizer_agent = SegmentizerAgent()
+sectionizer_agent = SectionizerAgent()
