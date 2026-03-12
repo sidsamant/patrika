@@ -340,7 +340,7 @@ def _render_prompt(
         "{{DOCUMENT_JSON}}": json.dumps(row, indent=2, ensure_ascii=True, default=str),
         "{{DOCUMENT_METADATA}}": json.dumps(row.get("metadata") or {}, indent=2, ensure_ascii=True, default=str),
         "{{DOCUMENT_TEXT}}": str(row.get("text") or ""),
-        "{{SEGMENTS_JSON}}": json.dumps(section_defs, indent=2, ensure_ascii=True, default=str),
+        "{{SECTIONS_JSON}}": json.dumps(section_defs, indent=2, ensure_ascii=True, default=str),
     }
     for placeholder, value in replacements.items():
         rendered = rendered.replace(placeholder, value)
