@@ -39,9 +39,3 @@ Return ONLY valid JSON following this structure:
     }
   ]
 }
-
-**Document Metadata as a JSON**
-{{DOCUMENT_METADATA}}
-
-**Following continous text is Document text**
-{{DOCUMENT_TEXT}}

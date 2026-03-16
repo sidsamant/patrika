@@ -328,18 +328,11 @@ def _path_get(payload: dict[str, Any], dotted_path: str) -> Any:
 def _render_prompt(
     template: str,
     *,
-    user_prompt: str,
-    row: dict[str, Any],
     section_defs: list[dict[str, Any]],
 ) -> str:
-    """Fill the prompt template with the current document and section definitions."""
+    """Fill the static prompt template with the configured section definitions."""
     rendered = template
     replacements = {
-        "{{USER_PROMPT}}": user_prompt or "Map standardized documents to configured newsletter sections.",
-        "{{DOC_ID}}": str(row.get("doc_id", "")),
-        "{{DOCUMENT_JSON}}": json.dumps(row, indent=2, ensure_ascii=True, default=str),
-        "{{DOCUMENT_METADATA}}": json.dumps(row.get("metadata") or {}, indent=2, ensure_ascii=True, default=str),
-        "{{DOCUMENT_TEXT}}": str(row.get("text") or ""),
         "{{SECTIONS_JSON}}": json.dumps(section_defs, indent=2, ensure_ascii=True, default=str),
     }
     for placeholder, value in replacements.items():
@@ -347,19 +340,21 @@ def _render_prompt(
     return rendered
 
 
-def sectionizer_instruction_provider(context: ReadonlyContext | Any) -> str:
-    """Render the LLM instruction from the external prompt template and current row state."""
-    row = _state_get(context, "sectionizer_current_row")
-    section_defs = _state_get(context, "sectionizer_section_defs")
-    user_prompt = str(_state_get(context, "sectionizer_runner_prompt") or "")
-    if not isinstance(row, dict):
-        row = {}
-    if not isinstance(section_defs, list):
-        section_defs = []
+def _render_document_payload(row: dict[str, Any]) -> str:
+    """Render the document-specific user message sent alongside the static instruction."""
+    return (
+        "Evaluate the current standardized document and return JSON only.\n\n"
+        "Document metadata:\n"
+        f"{json.dumps(row.get('metadata') or {}, indent=2, ensure_ascii=True, default=str)}\n\n"
+        "Document text:\n"
+        f"{str(row.get('text') or '')}"
+    )
+
+
+def _build_static_instruction(section_defs: list[dict[str, Any]]) -> str:
+    """Build the stable LLM instruction from the external prompt template and section config."""
     return _render_prompt(
         _load_prompt_template(),
-        user_prompt=user_prompt,
-        row=row,
         section_defs=[item for item in section_defs if isinstance(item, dict)],
     )
 
@@ -367,9 +362,20 @@ def sectionizer_instruction_provider(context: ReadonlyContext | Any) -> str:
 async def sectionizer_before_model_callback(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> LlmResponse | None:
-    """Log the rendered prompt and request payload before the ADK LLM call."""
-    runtime_instruction = sectionizer_instruction_provider(callback_context)
+    """Log the static instruction and per-document request payload before the ADK LLM call."""
+    row = _state_get(callback_context, "sectionizer_current_row")
+    if not isinstance(row, dict):
+        row = {}
+    runtime_instruction = getattr(llm_request.config, "system_instruction", "") or ""
+    runtime_document_payload = _render_document_payload(row)
     callback_context.state["sectionizer_runtime_instruction"] = runtime_instruction
+    callback_context.state["sectionizer_runtime_document_payload"] = runtime_document_payload
+    llm_request.contents = [
+        types.Content(
+            role="user",
+            parts=[types.Part(text=runtime_document_payload)],
+        )
+    ]
     instruction_tokens, content_tokens, prompt_tokens = _count_token_parts(runtime_instruction, llm_request)
     logger.debug("Sectionizer LLM token: %s", _get_llm_token_display())
     logger.debug(
@@ -378,7 +384,7 @@ async def sectionizer_before_model_callback(
         content_tokens if content_tokens is not None else "unavailable",
         prompt_tokens if prompt_tokens is not None else "unavailable",
     )
-    logger.debug("Sectionizer prompt payload:\n%s", runtime_instruction)
+    logger.debug("Sectionizer static instruction:\n%s", runtime_instruction)
     logger.debug("Sectionizer llm request contents: %s", getattr(llm_request, "contents", None))
     return None
 
@@ -437,11 +443,12 @@ def _section_key(value: Any) -> str:
 def _normalize_rule_scores(raw_section: dict[str, Any], section_def: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
     """Merge Gemini rule scores with plain-text config rules and compute the final score."""
     raw_rule_scores = raw_section.get("rule_scores")
+    if not isinstance(raw_rule_scores, list):
+        raw_rule_scores = []
     indexed_scores = {
         int(item.get("index")): item
         for item in raw_rule_scores
-        if isinstance(raw_rule_scores, list)
-        and isinstance(item, dict)
+        if isinstance(item, dict)
         and isinstance(item.get("index"), int)
     }
 
@@ -497,7 +504,7 @@ def _normalize_llm_result(section_defs: list[dict[str, Any]], raw_payload: dict[
     """Normalize the full Gemini payload into all evaluations, passing matches, and a doc summary."""
     raw_sections = raw_payload.get("sections") or raw_payload.get("segments")
     raw_sections_by_name = {
-        _section_key(item.get("section") or item.get("segment") or item.get("name")): item
+        _section_key(item.get("section") or item.get("section_name") or item.get("segment") or item.get("name")): item
         for item in raw_sections
         if isinstance(raw_sections, list) and isinstance(item, dict)
     }
@@ -530,11 +537,15 @@ class SectionizerAgent(BaseAgent):
 
     def __init__(self) -> None:
         """Initialize the sectionizer agent and its internal ADK LLM reviewer."""
+        config = _load_config()
+        section_defs = _normalize_section_definitions(config.get("sections"))
+        static_instruction = _build_static_instruction(section_defs)
+
         reviewer = LlmAgent(
             name="sectionizer_llm_reviewer",
             model=os.getenv("SECTIONIZER_GEMINI_MODEL", "gemini-2.5-flash-lite"),
             description="Scores documents against configured newsletter sections.",
-            instruction=sectionizer_instruction_provider,
+            static_instruction=static_instruction,
             before_model_callback=sectionizer_before_model_callback,
             output_key="sectionizer_llm_output",
             generate_content_config=types.GenerateContentConfig(
@@ -554,7 +565,7 @@ class SectionizerAgent(BaseAgent):
         """Evaluate each standardized row with the internal ADK LLM agent and emit persisted mappings."""
         user_prompt = _content_to_text(ctx.user_content)
         if user_prompt:
-            logger.debug("Sectionizer runner prompt: %s", user_prompt)
+            logger.debug("Sectionizer upstream runner prompt (not forwarded to Gemini): %s", user_prompt)
 
         config = _load_config()
         section_defs = _normalize_section_definitions(config.get("sections"))
@@ -571,7 +582,6 @@ class SectionizerAgent(BaseAgent):
 
             ctx.session.state["sectionizer_current_row"] = row
             ctx.session.state["sectionizer_section_defs"] = section_defs
-            ctx.session.state["sectionizer_runner_prompt"] = user_prompt
 
             raw_response = ""
             async for event in self._reviewer.run_async(ctx):
