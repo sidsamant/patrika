@@ -1,6 +1,6 @@
 sources:
   - id: filesystem
-    enabled: true
+    enabled: false
     path: "D:/ai/adk/demofiles"
 
   - id: confluence
@@ -22,3 +22,7 @@ sources:
   - id: whatsapp
     enabled: false
     path: "./data/whatsapp"
+
+  - id: webpages
+    enabled: true
+    path: "./agents/hoarder/sources/webpages/config.json"

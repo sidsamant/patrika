@@ -8,6 +8,7 @@ from .sources.filesource.agent import filesource_agent
 from .sources.gdocs.agent import create_gdocs_hoarder_agent
 from .sources.sharepoint.agent import create_sharepoint_hoarder_agent
 from .sources.slack.agent import create_slack_hoarder_agent
+from .sources.webpages.agent import create_webpages_hoarder_agent
 from .sources.whatsapp.agent import create_whatsapp_hoarder_agent
 
 
@@ -18,6 +19,7 @@ def _build_source_agent(source: SourceConfig):
         "gdocs": create_gdocs_hoarder_agent,
         "sharepoint": create_sharepoint_hoarder_agent,
         "slack": create_slack_hoarder_agent,
+        "webpages": create_webpages_hoarder_agent,
         "whatsapp": create_whatsapp_hoarder_agent,
     }
     builder = builders.get(source.id)

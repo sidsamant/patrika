@@ -27,8 +27,9 @@
    - summary facts grounded in the document
 12. `_normalize_rule_scores()` and `_normalize_section_result()` merge the Gemini output back with the configured plain-text rules and compute the section score as the average of returned per-rule scores.
 13. Sections whose computed score is at least `min_score` are copied into `matches`.
-14. The agent persists the final payload to:
-    - `outputs/sectionizer.json`
+14. The agent persists one JSON file per standardized document row to:
+    - `.output/sectionizer/doc_<doc_id>_<run_timestamp>.json`
+    - the `sectionizer_outputs` table in `data/standardizer.db`
     - `ctx.session.state["section_mappings"]`
 15. The same payload is emitted as the ADK event response.
 
@@ -103,21 +104,33 @@ The resolver supports dictionaries and list indices.
 
 ## Output Shape
 
-The output file contains:
+The emitted payload contains:
 
 ```json
 {
   "rowSource": "...",
   "sectionConfigPath": "...",
   "promptTemplatePath": "...",
+  "runTimestamp": "20260320-120000",
   "totalRows": 10,
   "matchedRows": 4,
-  "mappings": [
+  "outputDirectory": "D:\\ai\\newsletter_adk\\.output\\sectionizer",
+  "outputs": [
     {
+      "sectionizer_output_id": 123,
       "doc_id": 1,
-      "source_path": "...",
-      "document_summary": "...",
-      "section_evaluations": [
+      "output_path": "D:\\ai\\newsletter_adk\\.output\\sectionizer\\doc_1_20260320-120000.json",
+      "run_timestamp": "20260320-120000",
+      "created_at": "2026-03-20T12:00:00Z",
+      "match_count": 1,
+      "output": {
+        "rowSource": "...",
+        "sectionConfigPath": "...",
+        "promptTemplatePath": "...",
+        "runTimestamp": "20260320-120000",
+        "source_path": "...",
+        "document_summary": "...",
+        "section_evaluations": [
         {
           "section": "Engineering",
           "score": 0.6,
@@ -147,6 +160,7 @@ The output file contains:
           "rule_scores": []
         }
       ]
+      }
     }
   ]
 }

@@ -14,7 +14,7 @@ from google.genai import types
 from .util import reviewer_instruction_provider
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCREENER_OUTPUT_PATH = PROJECT_ROOT / "outputs" / "screener.json"
+SCREENER_OUTPUT_PATH = PROJECT_ROOT / ".output" / "screener.json"
 
 
 def _persist_screener_output(payload: str) -> None:

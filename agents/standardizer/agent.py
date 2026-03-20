@@ -40,7 +40,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 ARTIFACTS_DIR = DATA_DIR / "artifacts"
 DB_PATH = DATA_DIR / "standardizer.db"
-SCREENER_OUTPUT_PATH = PROJECT_ROOT / "outputs" / "screener.json"
+SCREENER_OUTPUT_PATH = PROJECT_ROOT / ".output" / "screener.json"
 LEGACY_SCREENER_OUTPUT_PATH = PROJECT_ROOT.parent / "adk" / "agent_output.txt"
 TEXT_EXTENSIONS = {
     ".txt",
@@ -517,6 +517,71 @@ def _extract_from_file(path: Path) -> tuple[str | None, dict[str, Any], list[dic
     return None, {"source_type": "unknown"}, [], f"Unsupported file type: {suffix or '[no extension]'}"
 
 
+def _is_web_source_item(item: dict[str, Any]) -> bool:
+    # Web hoarder items are already extracted summaries, so they should bypass
+    # the filesystem extractor entirely.
+    path = str(item.get("path") or item.get("pageUrl") or "").strip().lower()
+    if path.startswith("http://") or path.startswith("https://"):
+        return True
+    if str(item.get("sourceType") or "").strip().lower() == "webpage":
+        return True
+    return any(key in item for key in ("contentText", "pageSummary", "newsItems"))
+
+
+def _web_source_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    # Preserve a filesystem-like metadata shape so downstream consumers do not
+    # need special handling for URL-backed documents.
+    path = str(item.get("path") or item.get("pageUrl") or "").strip()
+    name = str(item.get("name") or item.get("pageTitle") or path).strip()
+    return {
+        "exists": False,
+        "name": name or path,
+        "path": path,
+        "suffix": ".html",
+        "mime_type": "text/html",
+        "source_type": "webpage",
+    }
+
+
+def _extract_from_web_item(item: dict[str, Any]) -> tuple[str | None, dict[str, Any], list[dict[str, str]], str | None]:
+    # Flatten page summary plus discovered news items into one text payload for
+    # storage and later sectioning.
+    news_items = item.get("newsItems")
+    news_lines: list[str] = []
+    if isinstance(news_items, list):
+        for news in news_items:
+            if not isinstance(news, dict):
+                continue
+            title = str(news.get("title") or "").strip()
+            summary = str(news.get("summary") or "").strip()
+            url = str(news.get("url") or "").strip()
+            published = str(news.get("publishedAt") or "").strip()
+            parts = [part for part in [title, summary, published, url] if part]
+            if parts:
+                news_lines.append(" | ".join(parts))
+
+    text_parts = [
+        str(item.get("pageTitle") or "").strip(),
+        str(item.get("pageSummary") or "").strip(),
+        str(item.get("contentText") or "").strip(),
+        "\n".join(news_lines).strip(),
+    ]
+    text_content = _normalize_text("\n\n".join(part for part in text_parts if part))
+
+    metadata = {
+        "title": str(item.get("pageTitle") or item.get("name") or "").strip() or None,
+        "description": str(item.get("pageSummary") or "").strip() or None,
+        "published_at": str(item.get("createdAt") or "").strip() or None,
+        "modified_at": str(item.get("modifiedAt") or "").strip() or None,
+        "company": str(item.get("company") or "").strip() or None,
+        "news_items": news_items if isinstance(news_items, list) else [],
+        "source_type": "webpage",
+    }
+
+    error = str(item.get("scrapeError") or "").strip() or None
+    return text_content, metadata, [], error
+
+
 class DocumentStandardizerAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(
@@ -539,16 +604,25 @@ class DocumentStandardizerAgent(BaseAgent):
             for item in selected_items:
                 source_path = str(item.get("path") or "").strip()
                 source_name = str(item.get("name") or "").strip()
-                candidate = Path(source_path) if source_path else Path(source_name)
-                resolved_path = candidate.expanduser().resolve()
+                is_web_item = _is_web_source_item(item)
 
-                text_content, extracted_metadata, extracted_media, extraction_error = _extract_from_file(resolved_path)
+                if is_web_item:
+                    resolved_path_str = source_path or str(item.get("pageUrl") or "").strip() or source_name
+                    text_content, extracted_metadata, extracted_media, extraction_error = _extract_from_web_item(item)
+                    filesystem_meta = _web_source_metadata(item)
+                else:
+                    candidate = Path(source_path) if source_path else Path(source_name)
+                    resolved_path = candidate.expanduser().resolve()
+                    resolved_path_str = str(resolved_path)
+                    text_content, extracted_metadata, extracted_media, extraction_error = _extract_from_file(
+                        resolved_path
+                    )
+                    filesystem_meta = _file_metadata(resolved_path)
                 status = "ok" if extraction_error is None else "error"
 
                 item_media = _extract_media_refs_from_item(item)
                 media_items = extracted_media + item_media
 
-                filesystem_meta = _file_metadata(resolved_path)
                 author = _infer_author(
                     text_content,
                     extracted_metadata.get("author") if isinstance(extracted_metadata, dict) else None,
@@ -573,7 +647,7 @@ class DocumentStandardizerAgent(BaseAgent):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        str(resolved_path),
+                        resolved_path_str,
                         author,
                         text_content,
                         _safe_json(metadata),

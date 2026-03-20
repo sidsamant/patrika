@@ -22,12 +22,12 @@ from google.genai import types
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = PROJECT_ROOT / ".env"
-OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+OUTPUTS_DIR = PROJECT_ROOT / ".output"
+SECTIONIZER_OUTPUTS_DIR = OUTPUTS_DIR / "sectionizer"
 LOGS_DIR = PROJECT_ROOT / ".logs"
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 SECTIONIZER_LOG_PATH = LOGS_DIR / f"sectionizer-{RUN_TIMESTAMP}.debug.log"
 STANDARDIZER_DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
-SECTIONIZER_OUTPUT_PATH = OUTPUTS_DIR / "sectionizer.json"
 CONFIG_PATH = Path(__file__).with_name("config.json")
 PROMPT_TEMPLATE_PATH = Path(__file__).with_name("prompt_template.md")
 
@@ -149,6 +149,77 @@ def _read_text_if_exists(path: Path) -> str | None:
         logger.exception("Failed reading text from %s", path)
         return None
     return None
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC timestamp in ISO 8601 format."""
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def _ensure_sectionizer_storage() -> None:
+    """Create the sectionizer output directory when needed."""
+    SECTIONIZER_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_sectionizer_schema(connection: sqlite3.Connection) -> None:
+    """Ensure the sectionizer run history table exists in the standardizer DB."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sectionizer_outputs (
+          sectionizer_output_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          doc_id INTEGER NOT NULL,
+          output_path TEXT NOT NULL,
+          run_timestamp TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(doc_id) REFERENCES documents(doc_id)
+        )
+        """
+    )
+    connection.commit()
+
+
+def _build_row_output_path(doc_id: Any) -> Path:
+    """Build a unique per-run JSON output path for one standardized document row."""
+    safe_doc_id = str(doc_id if doc_id is not None else "unknown").strip() or "unknown"
+    return SECTIONIZER_OUTPUTS_DIR / f"doc_{safe_doc_id}_{RUN_TIMESTAMP}.json"
+
+
+def _persist_row_output(
+    *,
+    connection: sqlite3.Connection,
+    row: dict[str, Any],
+    row_output_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Write one sectionizer JSON per standardized row and record the mapping table entry."""
+    _ensure_sectionizer_storage()
+    _ensure_sectionizer_schema(connection)
+
+    output_path = _build_row_output_path(row.get("doc_id"))
+    output_path.write_text(json.dumps(row_output_payload, indent=2), encoding="utf-8")
+
+    created_at = _utc_now_iso()
+    run_timestamp = RUN_TIMESTAMP
+    cursor = connection.execute(
+        """
+        INSERT INTO sectionizer_outputs (doc_id, output_path, run_timestamp, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            row.get("doc_id"),
+            str(output_path),
+            run_timestamp,
+            created_at,
+        ),
+    )
+    connection.commit()
+
+    return {
+        "sectionizer_output_id": int(cursor.lastrowid),
+        "doc_id": row.get("doc_id"),
+        "output_path": str(output_path),
+        "run_timestamp": run_timestamp,
+        "created_at": created_at,
+    }
 
 
 def _parse_json_object(raw_text: str | None) -> dict[str, Any]:
@@ -574,31 +645,37 @@ class SectionizerAgent(BaseAgent):
         standardized_rows, row_source = _load_standardized_rows(ctx)
         logger.debug("Sectionizer row source: %s (%d rows)", row_source, len(standardized_rows))
 
-        mappings: list[dict[str, Any]] = []
-        for row_index, row in enumerate(standardized_rows):
-            if row_index > 0 and LLM_REQUEST_DELAY_SECONDS > 0:
-                logger.debug("Sleeping %.2f seconds before next sectionizer LLM call.", LLM_REQUEST_DELAY_SECONDS)
-                await asyncio.sleep(LLM_REQUEST_DELAY_SECONDS)
+        persisted_outputs: list[dict[str, Any]] = []
+        with sqlite3.connect(STANDARDIZER_DB_PATH) as connection:
+            _ensure_sectionizer_schema(connection)
 
-            ctx.session.state["sectionizer_current_row"] = row
-            ctx.session.state["sectionizer_section_defs"] = section_defs
+            for row_index, row in enumerate(standardized_rows):
+                if row_index > 0 and LLM_REQUEST_DELAY_SECONDS > 0:
+                    logger.debug("Sleeping %.2f seconds before next sectionizer LLM call.", LLM_REQUEST_DELAY_SECONDS)
+                    await asyncio.sleep(LLM_REQUEST_DELAY_SECONDS)
 
-            raw_response = ""
-            async for event in self._reviewer.run_async(ctx):
-                content = getattr(event, "content", None)
-                parts = getattr(content, "parts", None) if content else None
-                if isinstance(parts, list):
-                    text = "".join((getattr(part, "text", "") or "") for part in parts).strip()
-                    if text:
-                        raw_response = text
+                ctx.session.state["sectionizer_current_row"] = row
+                ctx.session.state["sectionizer_section_defs"] = section_defs
 
-            if raw_response:
-                logger.debug("Sectionizer raw Gemini response:\n%s", raw_response)
+                raw_response = ""
+                async for event in self._reviewer.run_async(ctx):
+                    content = getattr(event, "content", None)
+                    parts = getattr(content, "parts", None) if content else None
+                    if isinstance(parts, list):
+                        text = "".join((getattr(part, "text", "") or "") for part in parts).strip()
+                        if text:
+                            raw_response = text
 
-            raw_payload = _extract_json_object(raw_response)
-            evaluations, matches, document_summary = _normalize_llm_result(section_defs, raw_payload)
-            mappings.append(
-                {
+                if raw_response:
+                    logger.debug("Sectionizer raw Gemini response:\n%s", raw_response)
+
+                raw_payload = _extract_json_object(raw_response)
+                evaluations, matches, document_summary = _normalize_llm_result(section_defs, raw_payload)
+                row_output_payload = {
+                    "rowSource": row_source,
+                    "sectionConfigPath": str(CONFIG_PATH),
+                    "promptTemplatePath": str(PROMPT_TEMPLATE_PATH),
+                    "runTimestamp": RUN_TIMESTAMP,
                     "doc_id": row.get("doc_id"),
                     "source_path": _path_get(row, "metadata.filesystem.path")
                     or _path_get(row, "metadata.source.path"),
@@ -606,27 +683,38 @@ class SectionizerAgent(BaseAgent):
                     "section_evaluations": evaluations,
                     "matches": matches,
                 }
-            )
-            logger.debug(
-                "Row %s produced %d passing sections out of %d evaluations.",
-                row.get("doc_id"),
-                len(matches),
-                len(evaluations),
-            )
+                persisted_record = _persist_row_output(
+                    connection=connection,
+                    row=row,
+                    row_output_payload=row_output_payload,
+                )
+                persisted_outputs.append(
+                    {
+                        **persisted_record,
+                        "match_count": len(matches),
+                        "output": row_output_payload,
+                    }
+                )
+                logger.debug(
+                    "Row %s produced %d passing sections out of %d evaluations and was written to %s.",
+                    row.get("doc_id"),
+                    len(matches),
+                    len(evaluations),
+                    persisted_record["output_path"],
+                )
 
-        matched_rows = sum(1 for item in mappings if item.get("matches"))
-        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        matched_rows = sum(1 for item in persisted_outputs if item.get("match_count"))
         output_payload = {
             "rowSource": row_source,
             "sectionConfigPath": str(CONFIG_PATH),
             "promptTemplatePath": str(PROMPT_TEMPLATE_PATH),
+            "runTimestamp": RUN_TIMESTAMP,
             "totalRows": len(standardized_rows),
             "matchedRows": matched_rows,
-            "mappings": mappings,
+            "outputDirectory": str(SECTIONIZER_OUTPUTS_DIR),
+            "outputs": persisted_outputs,
         }
-        SECTIONIZER_OUTPUT_PATH.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
         ctx.session.state["section_mappings"] = json.dumps(output_payload)
-        logger.debug("Sectionizer output written to %s", SECTIONIZER_OUTPUT_PATH)
         logger.debug("Sectionizer output payload: %s", json.dumps(output_payload, ensure_ascii=True))
 
         yield Event(
