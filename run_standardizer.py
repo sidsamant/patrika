@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from pathlib import Path
 from typing import Iterable
 
-from env import load_local_env
+from agents.hoarder.config import SourceConfig, load_hoarder_config
+from agents.hoarder.sources.filesource.agent import FilesourceHoarderAgent
+from dotenv import load_dotenv
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-load_local_env()
+PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(PROJECT_ROOT / ".env")
 
-from agents.hoarder.sources.filesource.agent import filesource_agent
 from agents.screener.agent_hosted import file_metadata_screening_agent
 from agents.standardizer.agent import standardizer_agent
 
@@ -40,7 +43,15 @@ async def _run_agent(runner: Runner, message: str) -> None:
             print(text)
 
 
+def _get_filesystem_source() -> SourceConfig:
+    for source in load_hoarder_config().sources:
+        if source.id == "filesystem" and source.enabled:
+            return source
+    raise ValueError("No enabled filesystem source found in agents/hoarder/config.yaml")
+
+
 async def _preload_file_list(session_service: InMemorySessionService) -> None:
+    filesource_agent = FilesourceHoarderAgent(_get_filesystem_source())
     source_path = filesource_agent._source_path()
     file_metadata = await filesource_agent._collect_file_metadata_with_mcp(source_path)
     session = await session_service.get_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)

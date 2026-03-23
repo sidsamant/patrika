@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import os
+from pathlib import Path
 from typing import Iterable
 
-from env import load_local_env
+from dotenv import load_dotenv
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-load_local_env()
-
-from agent import root_agent
+PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(PROJECT_ROOT / ".env")
 
 APP_NAME = "newsletter_adk"
 USER_ID = "local_user"
@@ -25,6 +27,19 @@ def _iter_text_parts(parts: Iterable[object]) -> Iterable[str]:
 
 
 async def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the full newsletter pipeline.")
+    parser.add_argument(
+        "--backend",
+        choices=["hosted", "ollama"],
+        help="Override the screener backend for this pipeline run.",
+    )
+    args = parser.parse_args()
+
+    if args.backend:
+        os.environ["SCREENER_BACKEND"] = args.backend
+
+    from agent import root_agent
+
     session_service = InMemorySessionService()
     await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
 

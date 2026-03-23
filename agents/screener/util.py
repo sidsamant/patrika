@@ -6,6 +6,7 @@ from typing import Any
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.models import LlmRequest, LlmResponse
+from google.genai import types
 
 
 def _state_get(context: Any, key: str) -> Any:
@@ -35,17 +36,19 @@ def _to_pretty_json(value: Any, empty_fallback: str) -> str:
     return json.dumps(value, indent=2)
 
 
-def reviewer_instruction_provider(context: ReadonlyContext | Any) -> str:
-    file_list = _state_get(context, "file_list")
+def _screening_rules_json(context: ReadonlyContext | Any) -> str:
+    """Render additional screening rules from state as pretty JSON."""
     screening_rules = _state_get(context, "screening_rules")
+    return _to_pretty_json(screening_rules, "{}")
 
-    file_list_json = _to_pretty_json(file_list, "[]")
-    screening_rules_json = _to_pretty_json(screening_rules, "{}")
+
+def reviewer_instruction_provider(context: ReadonlyContext | Any) -> str:
+    """Build the stable system instruction for the screener reviewer."""
+    screening_rules_json = _screening_rules_json(context)
 
     return f"""You are a metadata screening agent.
-## List of files to screen
-    Input files with metadata as JSON array:
-    {file_list_json}
+Your job is to review file metadata and decide which files are eligible for ingestion.
+Use the user message as the current batch of files to evaluate.
 
 ## Screening rules
 
@@ -64,10 +67,10 @@ def reviewer_instruction_provider(context: ReadonlyContext | Any) -> str:
 
 ## Output requirements
 - Return ONLY valid JSON.
-- Output must be a JSON array.
+- Output must be a JSON object with a top-level "files" array.
 - Include every input file exactly once.
 - Preserve all original metadata fields from each input item.
-- If input is missing/invalid, return an empty JSON array.
+- If input is missing/invalid, return {{"files":[]}}.
 
 ### JSON Schema of output items:
    {{
@@ -84,14 +87,32 @@ def reviewer_instruction_provider(context: ReadonlyContext | Any) -> str:
 }}"""
 
 
+def reviewer_content_provider(context: ReadonlyContext | Any) -> str:
+    """Build the per-request user content containing the current screening batch."""
+    file_list = _state_get(context, "file_list")
+    file_list_json = _to_pretty_json(file_list, "[]")
+    return (
+        "Screen the following file metadata batch and return JSON only.\n\n"
+        "Input files:\n"
+        f"{file_list_json}"
+    )
+
+
 async def simple_before_model_modifier(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> LlmResponse | None:
-    # Keep callback side effects minimal and deterministic. The instruction
-    # provider remains the source of truth for prompt construction.
+    """Split screener behavior into system instruction and per-request user content."""
     runtime_instruction = reviewer_instruction_provider(callback_context)
+    runtime_content = reviewer_content_provider(callback_context)
 
     callback_context.state["runtime_instruction"] = runtime_instruction
+    callback_context.state["runtime_content"] = runtime_content
+    llm_request.contents = [
+        types.Content(
+            role="user",
+            parts=[types.Part(text=runtime_content)],
+        )
+    ]
     return None
 
 

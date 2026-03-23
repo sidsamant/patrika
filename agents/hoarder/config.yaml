@@ -1,7 +1,7 @@
 sources:
   - id: filesystem
-    enabled: false
-    path: "D:/ai/adk/demofiles"
+    enabled: true
+    path: "D:/ai/newsletter_adk/demofiles/space"
 
   - id: confluence
     enabled: false
@@ -22,7 +22,3 @@ sources:
   - id: whatsapp
     enabled: false
     path: "./data/whatsapp"
-
-  - id: webpages
-    enabled: true
-    path: "./agents/hoarder/sources/webpages/config.json"

@@ -12,11 +12,11 @@ from google.genai import types
 PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(PROJECT_ROOT / ".env")
 
-from agents.hoarder.agent import root_agent
+from agents.newsletter_generator.agent import newsletter_generator_agent
 
-APP_NAME = "newsletter_adk"
+APP_NAME = "newsletter_generator"
 USER_ID = "local_user"
-SESSION_ID = "hoarder_session"
+SESSION_ID = "newsletter_generator_session"
 
 
 def _iter_text_parts(parts: Iterable[object]) -> Iterable[str]:
@@ -30,9 +30,8 @@ async def main() -> None:
     session_service = InMemorySessionService()
     await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
 
-    runner = Runner(agent=root_agent, app_name=APP_NAME, session_service=session_service)
-
-    prompt = types.Content(role="user", parts=[types.Part(text="Collect file metadata from configured sources")])
+    runner = Runner(agent=newsletter_generator_agent, app_name=APP_NAME, session_service=session_service)
+    prompt = types.Content(role="user", parts=[types.Part(text="Generate a markdown newsletter from latest sectionizer outputs")])
 
     async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=prompt):
         content = getattr(event, "content", None)

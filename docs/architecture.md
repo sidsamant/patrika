@@ -29,6 +29,7 @@ zenuml
 Ingests from various sources with unstructured data which is mostly documents. This phase should use various integrators (already avaiable or custom built)to ingest the metadata as well as document details(if required). It should filter data documents. To determine draft document use the meta data for now and check for the word "draft" or anything similar.
 
 Subcomponents
+
     a. Document hoarder - An AI agent that can adaptively integrate with document sources and read metadata and documents from them. The metadata would vary based on sources like Confluence, Gdoc, Sharepoint, Slack, Whatsapp, -etc. Checks in Time range, incremental.
 
         The "Draft" Filter: This is the most critical component. Two possible ways to achieve this:

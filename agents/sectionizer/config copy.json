@@ -1,0 +1,73 @@
+{
+  "sections": [
+    {
+      "name": "Executive",
+      "min_score": 0.25,
+      "rules": [
+        {
+          "field": "metadata.extracted.title",
+          "op": "contains",
+          "value": "executive",
+          "weight": 0.5
+        },
+        {
+          "field": "text",
+          "op": "contains",
+          "value": "quarterly results",
+          "weight": 0.5
+        }
+      ]
+    },
+    {
+      "name": "Engineering",
+      "min_score": 0.25,
+      "rules": [
+        {
+          "field": "text",
+          "op": "contains_any",
+          "value": [
+            "release notes",
+            "api",
+            "incident",
+            "architecture"
+          ],
+          "weight": 0.6
+        },
+        {
+          "field": "metadata.source.path",
+          "op": "contains",
+          "value": "engineering",
+          "weight": 0.4
+        }
+      ]
+    },
+    {
+      "name": "Security",
+      "min_score": 0.2,
+      "rules": [
+        {
+          "field": "text",
+          "op": "contains_any",
+          "value": [
+            "vulnerability",
+            "cve",
+            "breach",
+            "security advisory"
+          ],
+          "weight": 0.7
+        },
+        {
+          "field": "metadata.source.name",
+          "op": "regex",
+          "value": "(?i)security|advisory",
+          "weight": 0.3
+        }
+      ]
+    },
+    {
+      "name": "ISSUE RELATED INFORMATION",
+      "min_score": 0.2,
+      "rules": "A section in the document that contains infromation about Non Convertible Debenture issue price"
+    }
+  ]
+}

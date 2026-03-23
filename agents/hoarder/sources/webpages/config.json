@@ -1,0 +1,19 @@
+{
+  "pages": [
+    {
+      "company": "Digantara",
+      "url": "https://www.digantara.co.in/newsroom",
+      "page_name": "Newsroom",
+      "selector_type": "css",
+      "article_selector": "article",
+      "title_selector": "h1::text, h2::text, h3::text",
+      "link_selector": "a::attr(href)",
+      "text_selector": "p::text",
+      "published_at_selector": "time::text, [datetime]::attr(datetime)",
+      "page_content_selector": "main",
+      "meta": {
+        "sector": "space"
+      }
+    }
+  ]
+}

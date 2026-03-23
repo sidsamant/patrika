@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 import re
 import sqlite3
@@ -15,6 +16,8 @@ from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
+
+from ..screener.storage import DB_PATH, ensure_screened_files_schema
 
 try:
     from bs4 import BeautifulSoup
@@ -39,9 +42,9 @@ except Exception:  # pragma: no cover - optional dependency guard
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 ARTIFACTS_DIR = DATA_DIR / "artifacts"
-DB_PATH = DATA_DIR / "standardizer.db"
-SCREENER_OUTPUT_PATH = PROJECT_ROOT / ".output" / "screener.json"
-LEGACY_SCREENER_OUTPUT_PATH = PROJECT_ROOT.parent / "adk" / "agent_output.txt"
+LOGS_DIR = PROJECT_ROOT / ".logs"
+RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
+STANDARDIZER_LOG_PATH = LOGS_DIR / f"standardizer-{RUN_TIMESTAMP}.debug.log"
 TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -55,16 +58,49 @@ TEXT_EXTENSIONS = {
 }
 
 
+def _configure_logging() -> logging.Logger:
+    """Attach console and file handlers for standardizer debug logs."""
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    if not any(isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler) for handler in root_logger.handlers):
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(logging.DEBUG)
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    resolved_log_path = STANDARDIZER_LOG_PATH.resolve()
+    if not any(
+        isinstance(handler, logging.FileHandler) and Path(getattr(handler, "baseFilename", "")).resolve() == resolved_log_path
+        for handler in root_logger.handlers
+    ):
+        file_handler = logging.FileHandler(resolved_log_path, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+    return logging.getLogger(__name__)
+
+
+logger = _configure_logging()
+
+
 def _utc_now_iso() -> str:
+    """Return the current UTC timestamp in ISO 8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _ensure_storage() -> None:
+    """Create the local data and extracted-artifact directories if needed."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
+    """Ensure the SQLite tables for standardizer and screener handoff exist."""
+    ensure_screened_files_schema(connection)
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS documents (
@@ -94,10 +130,35 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_screened_files (
+          document_screened_file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          doc_id INTEGER NOT NULL,
+          screened_file_id INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(doc_id) REFERENCES documents(doc_id),
+          FOREIGN KEY(screened_file_id) REFERENCES screened_files(screened_file_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hoarder_output_media_assets (
+          hoarder_output_media_asset_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          hoarder_output_id INTEGER NOT NULL,
+          media_id INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(hoarder_output_id) REFERENCES hoarder_outputs(hoarder_output_id),
+          FOREIGN KEY(media_id) REFERENCES media_assets(media_id)
+        )
+        """
+    )
     connection.commit()
 
 
 def _to_iso_or_none(value: Any) -> str | None:
+    """Convert supported date-like values into ISO 8601 strings."""
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -109,6 +170,7 @@ def _to_iso_or_none(value: Any) -> str | None:
 
 
 def _normalize_text(text: str | None) -> str | None:
+    """Collapse whitespace in extracted text and return `None` when empty."""
     if not text:
         return None
     normalized = re.sub(r"\s+", " ", text).strip()
@@ -116,81 +178,138 @@ def _normalize_text(text: str | None) -> str | None:
 
 
 def _safe_json(value: Any) -> str:
+    """Serialize arbitrary metadata into JSON using string fallbacks."""
     return json.dumps(value, ensure_ascii=True, default=str)
 
 
-def _parse_screened_items(raw_value: Any) -> list[dict[str, Any]]:
-    if raw_value is None:
+def _load_screened_rows_from_db() -> list[dict[str, Any]]:
+    """Load selected screener rows that have not yet been processed by standardizer."""
+    if not DB_PATH.exists():
+        logger.debug("Shared standardizer DB not found at %s", DB_PATH)
         return []
 
-    payload = raw_value
-    if isinstance(raw_value, str):
-        stripped = raw_value.strip()
-        if not stripped:
-            return []
-        try:
-            payload = json.loads(stripped)
-        except json.JSONDecodeError:
-            return []
-
-    if isinstance(payload, dict):
-        files = payload.get("files")
-        if isinstance(files, list):
-            return [item for item in files if isinstance(item, dict)]
-        return []
-
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-
-    return []
-
-
-def _has_screened_items(raw_value: Any) -> bool:
-    return len(_parse_screened_items(raw_value)) > 0
-
-
-def _read_text_if_exists(path: Path) -> str | None:
     try:
-        if path.exists() and path.is_file():
-            text = path.read_text(encoding="utf-8").strip()
-            return text or None
+        with sqlite3.connect(DB_PATH) as connection:
+            ensure_screened_files_schema(connection)
+            cursor = connection.execute(
+                """
+                SELECT
+                  screened_file_id,
+                  source_payload_json,
+                  source_path,
+                  name,
+                  source_created_at,
+                  source_modified_at,
+                  created_at,
+                  processed_at
+                FROM screened_files
+                WHERE is_selected = 1
+                  AND processed_at IS NULL
+                ORDER BY screened_file_id ASC
+                """
+            )
+            rows: list[dict[str, Any]] = []
+            for record in cursor.fetchall():
+                payload_raw = record[1]
+                item: dict[str, Any] = {}
+                if isinstance(payload_raw, str) and payload_raw.strip():
+                    try:
+                        loaded = json.loads(payload_raw)
+                        if isinstance(loaded, dict):
+                            item = loaded
+                    except json.JSONDecodeError:
+                        logger.debug("Ignoring invalid screener row payload for screened_file_id=%s", record[0])
+
+                if not item:
+                    item = {
+                        "path": record[2],
+                        "name": record[3],
+                        "createdAt": record[4],
+                        "modifiedAt": record[5],
+                        "isSelected": True,
+                    }
+
+                item["_screened_file_id"] = int(record[0])
+                item["_screened_created_at"] = record[6]
+                item["_screened_processed_at"] = record[7]
+                rows.append(item)
+
+            logger.debug("Loaded %d selected unprocessed screener rows from %s", len(rows), DB_PATH)
+            return rows
     except Exception:
-        return None
-    return None
+        logger.exception("Failed loading screener rows from %s", DB_PATH)
+        return []
 
 
-def _load_screened_payload(ctx: InvocationContext) -> tuple[Any, str]:
-    from_outputs = _read_text_if_exists(SCREENER_OUTPUT_PATH)
-    if from_outputs and _has_screened_items(from_outputs):
-        return from_outputs, str(SCREENER_OUTPUT_PATH)
+def _dedupe_selected_screened_rows(
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """Keep only the latest selected screener row per logical source path."""
+    latest_by_path: dict[str, dict[str, Any]] = {}
+    duplicate_screened_file_ids: list[int] = []
 
-    from_legacy = _read_text_if_exists(LEGACY_SCREENER_OUTPUT_PATH)
-    if from_legacy and _has_screened_items(from_legacy):
-        return from_legacy, str(LEGACY_SCREENER_OUTPUT_PATH)
+    for item in items:
+        source_path = str(item.get("path") or item.get("pageUrl") or "").strip()
+        dedupe_key = source_path.lower() if source_path else f"screened_file_id:{item.get('_screened_file_id')}"
+        existing = latest_by_path.get(dedupe_key)
 
-    from_state = ctx.session.state.get("screened_file_list")
-    if _has_screened_items(from_state):
-        return from_state, "session_state.screened_file_list"
+        if existing is None:
+            latest_by_path[dedupe_key] = item
+            continue
 
-    if from_outputs:
-        return from_outputs, str(SCREENER_OUTPUT_PATH)
-    if from_legacy:
-        return from_legacy, str(LEGACY_SCREENER_OUTPUT_PATH)
-    return from_state, "session_state.screened_file_list"
+        current_id = item.get("_screened_file_id")
+        existing_id = existing.get("_screened_file_id")
+        if isinstance(current_id, int) and isinstance(existing_id, int) and current_id > existing_id:
+            duplicate_screened_file_ids.append(existing_id)
+            latest_by_path[dedupe_key] = item
+        elif isinstance(current_id, int):
+            duplicate_screened_file_ids.append(current_id)
+
+    deduped_items = sorted(
+        latest_by_path.values(),
+        key=lambda item: int(item.get("_screened_file_id")) if isinstance(item.get("_screened_file_id"), int) else 0,
+    )
+    return deduped_items, duplicate_screened_file_ids
+
+
+def _load_screened_payload(ctx: InvocationContext) -> tuple[list[dict[str, Any]], str]:
+    """Resolve screener input from the shared SQLite table."""
+    del ctx
+    from_db = _load_screened_rows_from_db()
+    if from_db:
+        return from_db, "sqlite.screened_files"
+    return [], "sqlite.screened_files"
+
+
+def _mark_screened_row_processed(connection: sqlite3.Connection, screened_file_id: int) -> str:
+    """Stamp the shared screener row after standardizer handles it."""
+    processed_at = _utc_now_iso()
+    connection.execute(
+        """
+        UPDATE screened_files
+        SET processed_at = ?
+        WHERE screened_file_id = ?
+        """,
+        (processed_at, screened_file_id),
+    )
+    return processed_at
 
 
 def _sha256_hex(text: str | None) -> str | None:
+    """Hash extracted text into a stable SHA-256 digest when present."""
     if not text:
         return None
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _guess_mime(path_or_url: str) -> str:
+    """Best-effort MIME type detection for file and URL-like paths."""
     mime, _ = mimetypes.guess_type(path_or_url)
     return mime or "application/octet-stream"
 
 
 def _file_metadata(path: Path) -> dict[str, Any]:
+    """Collect filesystem metadata for a local file candidate."""
     if not path.exists() or not path.is_file():
         return {
             "exists": False,
@@ -213,25 +332,31 @@ def _file_metadata(path: Path) -> dict[str, Any]:
 
 
 def _read_text_file(path: Path) -> tuple[str | None, str | None]:
+    """Read a plain-text file by trying a few common encodings."""
     for encoding in ("utf-8", "utf-16", "latin-1"):
         try:
+            logger.debug("Trying to read text file %s with encoding=%s", path, encoding)
             return path.read_text(encoding=encoding), None
         except UnicodeDecodeError:
             continue
         except Exception as error:
+            logger.exception("Text extraction failed for %s", path)
             return None, f"Text extraction failed: {error}"
     return None, "Text extraction failed: unsupported character encoding"
 
 
 def _extract_html(path: Path) -> tuple[str | None, dict[str, Any], list[dict[str, str]], str | None]:
+    """Extract normalized text, metadata, and image refs from an HTML file."""
     if BeautifulSoup is None:
         return None, {}, [], "Missing dependency: beautifulsoup4"
 
     try:
         html = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
+        logger.debug("Retrying HTML extraction for %s with latin-1 fallback", path)
         html = path.read_text(encoding="latin-1", errors="replace")
     except Exception as error:
+        logger.exception("HTML extraction failed for %s", path)
         return None, {}, [], f"HTML extraction failed: {error}"
 
     soup = BeautifulSoup(html, "html.parser")
@@ -242,6 +367,7 @@ def _extract_html(path: Path) -> tuple[str | None, dict[str, Any], list[dict[str
     text = soup.get_text(separator="\n", strip=True)
 
     def _meta_value(*keys: str) -> str | None:
+        """Read the first matching meta-tag content value for any of the given keys."""
         lowered = {k.lower() for k in keys}
         for meta in soup.find_all("meta"):
             for attr in ("name", "property", "itemprop", "http-equiv"):
@@ -296,16 +422,19 @@ def _extract_html(path: Path) -> tuple[str | None, dict[str, Any], list[dict[str
         "language": _meta_value("og:locale", "language", "dc.language"),
         "source_type": "html",
     }
+    logger.debug("Extracted HTML content from %s with %d media refs", path, len(media))
     return _normalize_text(text), metadata, media, None
 
 
 def _extract_pdf(path: Path) -> tuple[str | None, dict[str, Any], list[dict[str, str]], str | None]:
+    """Extract text, PDF metadata, and embedded images when available."""
     if PdfReader is None:
         return None, {}, [], "Missing dependency: pypdf"
 
     try:
         reader = PdfReader(str(path))
     except Exception as error:
+        logger.exception("PDF open failed for %s", path)
         return None, {}, [], f"PDF open failed: {error}"
 
     page_text: list[str] = []
@@ -376,10 +505,18 @@ def _extract_pdf(path: Path) -> tuple[str | None, dict[str, Any], list[dict[str,
     if not text and not error:
         error = "No extractable text found (possibly scanned/image-only PDF)"
 
+    logger.debug(
+        "Extracted PDF content from %s: pages=%d media=%d error=%s",
+        path,
+        len(reader.pages),
+        len(media),
+        bool(error),
+    )
     return text, metadata, media, error
 
 
 def _extract_docx_media(path: Path) -> list[dict[str, str]]:
+    """Extract embedded Word media into the shared artifacts directory."""
     media_refs: list[dict[str, str]] = []
     artifact_prefix = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
 
@@ -404,18 +541,21 @@ def _extract_docx_media(path: Path) -> list[dict[str, str]]:
                     }
                 )
     except Exception:
+        logger.exception("Failed extracting DOCX media from %s", path)
         return []
 
     return media_refs
 
 
 def _extract_docx(path: Path) -> tuple[str | None, dict[str, Any], list[dict[str, str]], str | None]:
+    """Extract text, metadata, and media refs from a Word document."""
     if Document is None:
         return None, {}, [], "Missing dependency: python-docx"
 
     try:
         document = Document(str(path))
     except Exception as error:
+        logger.exception("Word document open failed for %s", path)
         return None, {}, [], f"Word document open failed: {error}"
 
     chunks: list[str] = []
@@ -448,10 +588,12 @@ def _extract_docx(path: Path) -> tuple[str | None, dict[str, Any], list[dict[str
     media = _extract_docx_media(path)
     text = _normalize_text("\n".join(chunks))
     error = None if text else "No extractable text found in Word document"
+    logger.debug("Extracted DOCX content from %s with %d media refs", path, len(media))
     return text, metadata, media, error
 
 
 def _extract_media_refs_from_item(item: dict[str, Any]) -> list[dict[str, str]]:
+    """Collect attachment-like media references already present on the source item."""
     media_refs: list[dict[str, str]] = []
     for key in ("media", "mediaPaths", "attachments"):
         value = item.get(key)
@@ -469,6 +611,7 @@ def _extract_media_refs_from_item(item: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _infer_author(text: str | None, metadata_author: str | None, source_author: str | None) -> str | None:
+    """Resolve an author from explicit metadata first, then simple text heuristics."""
     for candidate in (source_author, metadata_author):
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
@@ -492,6 +635,7 @@ def _infer_author(text: str | None, metadata_author: str | None, source_author: 
 
 
 def _extract_from_file(path: Path) -> tuple[str | None, dict[str, Any], list[dict[str, str]], str | None]:
+    """Dispatch local file extraction based on the file suffix."""
     suffix = path.suffix.lower()
     if not path.exists() or not path.is_file():
         return None, {}, [], f"File not found: {path}"
@@ -518,6 +662,7 @@ def _extract_from_file(path: Path) -> tuple[str | None, dict[str, Any], list[dic
 
 
 def _is_web_source_item(item: dict[str, Any]) -> bool:
+    """Detect hoarder outputs that already represent web-extracted content."""
     # Web hoarder items are already extracted summaries, so they should bypass
     # the filesystem extractor entirely.
     path = str(item.get("path") or item.get("pageUrl") or "").strip().lower()
@@ -529,6 +674,7 @@ def _is_web_source_item(item: dict[str, Any]) -> bool:
 
 
 def _web_source_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    """Build filesystem-like metadata for URL-backed source items."""
     # Preserve a filesystem-like metadata shape so downstream consumers do not
     # need special handling for URL-backed documents.
     path = str(item.get("path") or item.get("pageUrl") or "").strip()
@@ -544,6 +690,7 @@ def _web_source_metadata(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_from_web_item(item: dict[str, Any]) -> tuple[str | None, dict[str, Any], list[dict[str, str]], str | None]:
+    """Flatten a hoarder web item into persisted text and metadata fields."""
     # Flatten page summary plus discovered news items into one text payload for
     # storage and later sectioning.
     news_items = item.get("newsItems")
@@ -583,28 +730,53 @@ def _extract_from_web_item(item: dict[str, Any]) -> tuple[str | None, dict[str, 
 
 
 class DocumentStandardizerAgent(BaseAgent):
+    """Persist screened documents as normalized text and metadata records."""
+
     def __init__(self) -> None:
+        """Initialize the standardizer agent."""
         super().__init__(
             name="document_standardizer_agent",
             description="Reads screener output, extracts document content and metadata, and persists standardized records.",
         )
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
+        """Load screened items, normalize them, persist them, and emit the summary payload."""
         _ensure_storage()
+        logger.debug("Starting standardizer run. db_path=%s", DB_PATH)
 
-        screened_raw, screened_source = _load_screened_payload(ctx)
-        screened_items = _parse_screened_items(screened_raw)
+        screened_items, screened_source = _load_screened_payload(ctx)
+        logger.debug("Loaded %d screened items from %s", len(screened_items), screened_source)
 
         selected_items = [item for item in screened_items if bool(item.get("isSelected", True))]
+        selected_items, duplicate_screened_file_ids = _dedupe_selected_screened_rows(selected_items)
+        logger.debug(
+            "Selected %d deduped items for standardization. skipped_duplicates=%d",
+            len(selected_items),
+            len(duplicate_screened_file_ids),
+        )
         standardized_documents: list[dict[str, Any]] = []
 
         with sqlite3.connect(DB_PATH) as connection:
             _ensure_schema(connection)
 
+            for screened_file_id in duplicate_screened_file_ids:
+                processed_at = _mark_screened_row_processed(connection, screened_file_id)
+                logger.debug(
+                    "Marked duplicate screened_file_id=%s processed at %s without standardization",
+                    screened_file_id,
+                    processed_at,
+                )
+
             for item in selected_items:
                 source_path = str(item.get("path") or "").strip()
                 source_name = str(item.get("name") or "").strip()
                 is_web_item = _is_web_source_item(item)
+                logger.debug(
+                    "Standardizing item path=%s name=%s is_web_item=%s",
+                    source_path,
+                    source_name,
+                    is_web_item,
+                )
 
                 if is_web_item:
                     resolved_path_str = source_path or str(item.get("pageUrl") or "").strip() or source_name
@@ -619,6 +791,13 @@ class DocumentStandardizerAgent(BaseAgent):
                     )
                     filesystem_meta = _file_metadata(resolved_path)
                 status = "ok" if extraction_error is None else "error"
+                logger.debug(
+                    "Extraction complete for %s status=%s text_present=%s media_count=%d",
+                    resolved_path_str,
+                    status,
+                    bool(text_content),
+                    len(extracted_media),
+                )
 
                 item_media = _extract_media_refs_from_item(item)
                 media_items = extracted_media + item_media
@@ -637,6 +816,8 @@ class DocumentStandardizerAgent(BaseAgent):
 
                 persisted_at = _utc_now_iso()
                 content_sha256 = _sha256_hex(text_content)
+                screened_file_id = item.get("_screened_file_id")
+                hoarder_output_id = item.get("_hoarder_output_id")
 
                 cursor = connection.execute(
                     """
@@ -660,6 +841,25 @@ class DocumentStandardizerAgent(BaseAgent):
                     ),
                 )
                 doc_id = int(cursor.lastrowid)
+                logger.debug("Inserted document row doc_id=%s source_path=%s", doc_id, resolved_path_str)
+
+                if isinstance(screened_file_id, int):
+                    connection.execute(
+                        """
+                        INSERT INTO document_screened_files (doc_id, screened_file_id, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (doc_id, screened_file_id, persisted_at),
+                    )
+
+                processed_at = None
+                if isinstance(screened_file_id, int):
+                    processed_at = _mark_screened_row_processed(connection, screened_file_id)
+                    logger.debug(
+                        "Marked screened_file_id=%s processed at %s",
+                        screened_file_id,
+                        processed_at,
+                    )
 
                 persisted_media: list[dict[str, str]] = []
                 for media_ref in media_items:
@@ -675,7 +875,17 @@ class DocumentStandardizerAgent(BaseAgent):
                         """,
                         (doc_id, artifact_path, mime_type, persisted_at),
                     )
+                    media_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+                    if isinstance(hoarder_output_id, int):
+                        connection.execute(
+                            """
+                            INSERT INTO hoarder_output_media_assets (hoarder_output_id, media_id, created_at)
+                            VALUES (?, ?, ?)
+                            """,
+                            (hoarder_output_id, media_id, persisted_at),
+                        )
                     persisted_media.append({"artifact_path": artifact_path, "mime_type": mime_type})
+                logger.debug("Persisted %d media rows for doc_id=%s", len(persisted_media), doc_id)
 
                 standardized_documents.append(
                     {
@@ -689,10 +899,13 @@ class DocumentStandardizerAgent(BaseAgent):
                             "error": extraction_error,
                         },
                         "content_sha256": content_sha256,
+                        "screened_file_id": screened_file_id,
+                        "processed_at": processed_at,
                     }
                 )
 
             connection.commit()
+            logger.debug("Committed %d standardized documents to %s", len(standardized_documents), DB_PATH)
 
         standardizer_payload = {
             "persistedCount": len(standardized_documents),
@@ -701,6 +914,7 @@ class DocumentStandardizerAgent(BaseAgent):
             "documents": standardized_documents,
         }
         ctx.session.state["standardized_documents"] = json.dumps(standardized_documents)
+        logger.debug("Standardizer output payload: %s", json.dumps(standardizer_payload, ensure_ascii=True, default=str))
 
         yield Event(
             author=self.name,

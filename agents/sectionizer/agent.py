@@ -22,8 +22,6 @@ from google.genai import types
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = PROJECT_ROOT / ".env"
-OUTPUTS_DIR = PROJECT_ROOT / ".output"
-SECTIONIZER_OUTPUTS_DIR = OUTPUTS_DIR / "sectionizer"
 LOGS_DIR = PROJECT_ROOT / ".logs"
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 SECTIONIZER_LOG_PATH = LOGS_DIR / f"sectionizer-{RUN_TIMESTAMP}.debug.log"
@@ -156,9 +154,15 @@ def _utc_now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
-def _ensure_sectionizer_storage() -> None:
-    """Create the sectionizer output directory when needed."""
-    SECTIONIZER_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
+    """Add a missing SQLite column when upgrading an existing table."""
+    existing_columns = {
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        if len(row) > 1
+    }
+    if column_name not in existing_columns:
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 def _ensure_sectionizer_schema(connection: sqlite3.Connection) -> None:
@@ -169,19 +173,35 @@ def _ensure_sectionizer_schema(connection: sqlite3.Connection) -> None:
           sectionizer_output_id INTEGER PRIMARY KEY AUTOINCREMENT,
           doc_id INTEGER NOT NULL,
           output_path TEXT NOT NULL,
+          source_path TEXT,
+          llm_instruction TEXT,
+          llm_content TEXT,
+          output_json TEXT,
+          match_count INTEGER,
           run_timestamp TEXT NOT NULL,
           created_at TEXT NOT NULL,
           FOREIGN KEY(doc_id) REFERENCES documents(doc_id)
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sectionizer_output_documents (
+          sectionizer_output_document_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sectionizer_output_id INTEGER NOT NULL,
+          doc_id INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(sectionizer_output_id) REFERENCES sectionizer_outputs(sectionizer_output_id),
+          FOREIGN KEY(doc_id) REFERENCES documents(doc_id)
+        )
+        """
+    )
+    _ensure_column(connection, "sectionizer_outputs", "source_path", "TEXT")
+    _ensure_column(connection, "sectionizer_outputs", "llm_instruction", "TEXT")
+    _ensure_column(connection, "sectionizer_outputs", "llm_content", "TEXT")
+    _ensure_column(connection, "sectionizer_outputs", "output_json", "TEXT")
+    _ensure_column(connection, "sectionizer_outputs", "match_count", "INTEGER")
     connection.commit()
-
-
-def _build_row_output_path(doc_id: Any) -> Path:
-    """Build a unique per-run JSON output path for one standardized document row."""
-    safe_doc_id = str(doc_id if doc_id is not None else "unknown").strip() or "unknown"
-    return SECTIONIZER_OUTPUTS_DIR / f"doc_{safe_doc_id}_{RUN_TIMESTAMP}.json"
 
 
 def _persist_row_output(
@@ -190,33 +210,60 @@ def _persist_row_output(
     row: dict[str, Any],
     row_output_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Write one sectionizer JSON per standardized row and record the mapping table entry."""
-    _ensure_sectionizer_storage()
+    """Insert one sectionizer output row into SQLite without replacing prior runs."""
     _ensure_sectionizer_schema(connection)
-
-    output_path = _build_row_output_path(row.get("doc_id"))
-    output_path.write_text(json.dumps(row_output_payload, indent=2), encoding="utf-8")
 
     created_at = _utc_now_iso()
     run_timestamp = RUN_TIMESTAMP
+    source_path = str(row_output_payload.get("source_path") or "").strip() or None
+    match_count = len(row_output_payload.get("matches") or []) if isinstance(row_output_payload.get("matches"), list) else 0
+    llm_instruction = str(row_output_payload.get("llm_instruction") or "").strip() or None
+    llm_content = str(row_output_payload.get("llm_content") or "").strip() or None
     cursor = connection.execute(
         """
-        INSERT INTO sectionizer_outputs (doc_id, output_path, run_timestamp, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO sectionizer_outputs (
+          doc_id,
+          output_path,
+          source_path,
+          llm_instruction,
+          llm_content,
+          output_json,
+          match_count,
+          run_timestamp,
+          created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row.get("doc_id"),
-            str(output_path),
+            "",
+            source_path,
+            llm_instruction,
+            llm_content,
+            json.dumps(row_output_payload, ensure_ascii=True, default=str),
+            match_count,
             run_timestamp,
             created_at,
         ),
     )
+    sectionizer_output_id = int(cursor.lastrowid)
+    connection.execute(
+        """
+        INSERT INTO sectionizer_output_documents (sectionizer_output_id, doc_id, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (sectionizer_output_id, row.get("doc_id"), created_at),
+    )
     connection.commit()
 
     return {
-        "sectionizer_output_id": int(cursor.lastrowid),
+        "sectionizer_output_id": sectionizer_output_id,
         "doc_id": row.get("doc_id"),
-        "output_path": str(output_path),
+        "source_path": source_path,
+        "llm_instruction": llm_instruction,
+        "llm_content": llm_content,
+        "output_json": row_output_payload,
+        "match_count": match_count,
         "run_timestamp": run_timestamp,
         "created_at": created_at,
     }
@@ -250,7 +297,7 @@ def _load_prompt_template() -> str:
 
 
 def _load_rows_from_db() -> list[dict[str, Any]]:
-    """Load standardized document rows from the SQLite database if it exists."""
+    """Load the latest unsectionized standardized rows, deduped by source path."""
     if not STANDARDIZER_DB_PATH.exists():
         logger.debug("Standardizer database not found at %s", STANDARDIZER_DB_PATH)
         return []
@@ -258,6 +305,32 @@ def _load_rows_from_db() -> list[dict[str, Any]]:
         with sqlite3.connect(STANDARDIZER_DB_PATH) as connection:
             cursor = connection.execute(
                 """
+                WITH ranked_documents AS (
+                  SELECT
+                    d.doc_id,
+                    d.source_path,
+                    d.author,
+                    d.text_content,
+                    d.metadata_json,
+                    d.extraction_status,
+                    d.extraction_error,
+                    d.content_sha256,
+                    d.modified_at,
+                    d.created_at,
+                    d.persisted_at,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY COALESCE(NULLIF(LOWER(TRIM(d.source_path)), ''), 'doc:' || CAST(d.doc_id AS TEXT))
+                      ORDER BY d.doc_id DESC
+                    ) AS source_rank
+                  FROM documents d
+                  WHERE d.text_content IS NOT NULL
+                    AND TRIM(d.text_content) <> ''
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM sectionizer_outputs so
+                      WHERE so.doc_id = d.doc_id
+                    )
+                )
                 SELECT
                   doc_id,
                   source_path,
@@ -270,9 +343,8 @@ def _load_rows_from_db() -> list[dict[str, Any]]:
                   modified_at,
                   created_at,
                   persisted_at
-                FROM documents
-                WHERE text_content IS NOT NULL
-                  AND TRIM(text_content) <> ''
+                FROM ranked_documents
+                WHERE source_rank = 1
                 ORDER BY doc_id ASC
                 """
             )
@@ -304,7 +376,7 @@ def _load_rows_from_db() -> list[dict[str, Any]]:
                         "persisted_at": record[10],
                     }
                 )
-            logger.debug("Loaded %d standardized rows from %s", len(rows), STANDARDIZER_DB_PATH)
+            logger.debug("Loaded %d deduped unprocessed standardized rows from %s", len(rows), STANDARDIZER_DB_PATH)
             return rows
     except Exception:
         logger.exception("Failed loading standardized rows from %s", STANDARDIZER_DB_PATH)
@@ -669,6 +741,8 @@ class SectionizerAgent(BaseAgent):
                 if raw_response:
                     logger.debug("Sectionizer raw Gemini response:\n%s", raw_response)
 
+                llm_instruction = str(ctx.session.state.get("sectionizer_runtime_instruction") or "").strip()
+                llm_content = str(ctx.session.state.get("sectionizer_runtime_document_payload") or "").strip()
                 raw_payload = _extract_json_object(raw_response)
                 evaluations, matches, document_summary = _normalize_llm_result(section_defs, raw_payload)
                 row_output_payload = {
@@ -679,6 +753,8 @@ class SectionizerAgent(BaseAgent):
                     "doc_id": row.get("doc_id"),
                     "source_path": _path_get(row, "metadata.filesystem.path")
                     or _path_get(row, "metadata.source.path"),
+                    "llm_instruction": llm_instruction,
+                    "llm_content": llm_content,
                     "document_summary": document_summary,
                     "section_evaluations": evaluations,
                     "matches": matches,
@@ -696,11 +772,11 @@ class SectionizerAgent(BaseAgent):
                     }
                 )
                 logger.debug(
-                    "Row %s produced %d passing sections out of %d evaluations and was written to %s.",
+                    "Row %s produced %d passing sections out of %d evaluations and was inserted into sectionizer_outputs with id=%s.",
                     row.get("doc_id"),
                     len(matches),
                     len(evaluations),
-                    persisted_record["output_path"],
+                    persisted_record["sectionizer_output_id"],
                 )
 
         matched_rows = sum(1 for item in persisted_outputs if item.get("match_count"))
@@ -711,7 +787,7 @@ class SectionizerAgent(BaseAgent):
             "runTimestamp": RUN_TIMESTAMP,
             "totalRows": len(standardized_rows),
             "matchedRows": matched_rows,
-            "outputDirectory": str(SECTIONIZER_OUTPUTS_DIR),
+            "storage": "sqlite.sectionizer_outputs",
             "outputs": persisted_outputs,
         }
         ctx.session.state["section_mappings"] = json.dumps(output_payload)
