@@ -4,9 +4,11 @@ import json
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
@@ -16,6 +18,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = PROJECT_ROOT / ".output"
 NEWSLETTER_OUTPUT_DIR = OUTPUT_DIR / "newsletter"
 STANDARDIZER_DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+HTML_TEMPLATE_NAME = "mobile_newsletter.html.j2"
 
 
 def _utc_now() -> datetime:
@@ -49,6 +53,7 @@ def _ensure_newsletter_schema(connection: sqlite3.Connection) -> None:
           llm_instruction TEXT,
           llm_content TEXT,
           output_markdown TEXT NOT NULL,
+          output_html TEXT,
           output_json TEXT NOT NULL,
           created_at TEXT NOT NULL
         )
@@ -68,6 +73,7 @@ def _ensure_newsletter_schema(connection: sqlite3.Connection) -> None:
     )
     _ensure_column(connection, "newsletter_runs", "llm_instruction", "TEXT")
     _ensure_column(connection, "newsletter_runs", "llm_content", "TEXT")
+    _ensure_column(connection, "newsletter_runs", "output_html", "TEXT")
     connection.commit()
 
 
@@ -203,6 +209,17 @@ def _story_sort_key(story: dict[str, Any]) -> tuple[float, str]:
     return (-float(story.get("score") or 0), str(story.get("newsletter_title") or ""))
 
 
+def _sorted_story_sections(stories_by_section: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Convert grouped stories into a stable sorted section list for rendering."""
+    return [
+        {
+            "name": section_name,
+            "stories": sorted(section_stories, key=_story_sort_key),
+        }
+        for section_name, section_stories in sorted(stories_by_section.items())
+    ]
+
+
 def _render_markdown(*, run_timestamp: str, stories_by_section: dict[str, list[dict[str, Any]]]) -> str:
     """Render the newsletter markdown from grouped story data."""
     total_story_count = sum(len(items) for items in stories_by_section.values())
@@ -254,6 +271,35 @@ def _render_markdown(*, run_timestamp: str, stories_by_section: dict[str, list[d
     return "\n".join(lines).strip() + "\n"
 
 
+def _build_newsletter_render_context(*, run_timestamp: str, stories_by_section: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Build a reusable template context for newsletter rendering outputs."""
+    sections = _sorted_story_sections(stories_by_section)
+    total_story_count = sum(len(section["stories"]) for section in sections)
+    return {
+        "title": "Weekly Newsletter",
+        "run_timestamp": run_timestamp,
+        "total_story_count": total_story_count,
+        "sections": sections,
+    }
+
+
+@lru_cache(maxsize=1)
+def _template_environment() -> Environment:
+    """Create the Jinja2 environment for newsletter templates."""
+    return Environment(
+        loader=FileSystemLoader(str(TEMPLATES_DIR)),
+        autoescape=select_autoescape(enabled_extensions=("html", "xml", "j2")),
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+
+
+def _render_html(*, template_context: dict[str, Any]) -> str:
+    """Render the mobile-first printable HTML newsletter."""
+    template = _template_environment().get_template(HTML_TEMPLATE_NAME)
+    return template.render(**template_context)
+
+
 def _build_newsletter_instruction() -> str:
     """Build the stable generation instruction stored for each newsletter run."""
     return (
@@ -275,6 +321,7 @@ def _persist_newsletter_run(
     llm_instruction: str,
     llm_content: str,
     newsletter_markdown: str,
+    newsletter_html: str,
     output_payload: dict[str, Any],
     sectionizer_output_ids: list[int],
 ) -> int:
@@ -288,15 +335,17 @@ def _persist_newsletter_run(
           llm_instruction,
           llm_content,
           output_markdown,
+          output_html,
           output_json,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_timestamp,
             llm_instruction,
             llm_content,
             newsletter_markdown,
+            newsletter_html,
             json.dumps(output_payload, ensure_ascii=True, default=str),
             created_at,
         ),
@@ -372,16 +421,25 @@ class NewsletterGeneratorAgent(BaseAgent):
         run_timestamp = run_timestamp or _utc_now().strftime("%Y%m%d-%H%M%S")
         llm_instruction = _build_newsletter_instruction()
         llm_content = _build_newsletter_content(sectionizer_outputs)
+        template_context = _build_newsletter_render_context(
+            run_timestamp=run_timestamp,
+            stories_by_section=dict(stories_by_section),
+        )
 
         NEWSLETTER_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         newsletter_markdown = _render_markdown(run_timestamp=run_timestamp, stories_by_section=dict(stories_by_section))
+        newsletter_html = _render_html(template_context=template_context)
         markdown_path = NEWSLETTER_OUTPUT_DIR / f"newsletter_{run_timestamp}.md"
+        html_path = NEWSLETTER_OUTPUT_DIR / f"newsletter_{run_timestamp}.html"
         markdown_path.write_text(newsletter_markdown, encoding="utf-8")
+        html_path.write_text(newsletter_html, encoding="utf-8")
 
         output_payload = {
             "runTimestamp": run_timestamp,
             "storage": "sqlite.newsletter_runs",
             "newsletterPath": str(markdown_path),
+            "newsletterHtmlPath": str(html_path),
+            "printableHtmlPath": str(html_path),
             "generatedAt": _utc_now_iso(),
             "sectionCount": len(stories_by_section),
             "storyCount": sum(len(items) for items in stories_by_section.values()),
@@ -402,6 +460,7 @@ class NewsletterGeneratorAgent(BaseAgent):
                 llm_instruction=llm_instruction,
                 llm_content=llm_content,
                 newsletter_markdown=newsletter_markdown,
+                newsletter_html=newsletter_html,
                 output_payload=output_payload,
                 sectionizer_output_ids=sectionizer_output_ids,
             )
@@ -409,6 +468,7 @@ class NewsletterGeneratorAgent(BaseAgent):
         output_payload["newsletterRunId"] = newsletter_run_id
         output_payload["sectionizerOutputIds"] = sectionizer_output_ids
         ctx.session.state["newsletter_markdown_path"] = str(markdown_path)
+        ctx.session.state["newsletter_html_path"] = str(html_path)
         ctx.session.state["newsletter_output"] = json.dumps(output_payload)
 
         yield Event(

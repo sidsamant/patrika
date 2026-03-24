@@ -1,16 +1,204 @@
 from __future__ import annotations
 
 import json
+import io
 import sqlite3
 import subprocess
+from datetime import date, datetime
+from html import escape
 from pathlib import Path
 import sys
 
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 RUN_PIPELINE_PATH = PROJECT_ROOT / "run_pipeline.py"
+
+
+def apply_admin_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+          --app-bg: #f4f7fb;
+          --panel-bg: #ffffff;
+          --panel-muted: #f8fbff;
+          --border: #dbe5f0;
+          --text: #172033;
+          --muted: #61708a;
+          --brand: #1976ff;
+          --brand-strong: #0e5ddd;
+          --brand-soft: rgba(25, 118, 255, 0.14);
+          --success: #18a957;
+          --shadow: 0 18px 45px rgba(18, 38, 63, 0.08);
+        }
+
+        .stApp {
+          background:
+            radial-gradient(circle at top right, rgba(25, 118, 255, 0.08), transparent 28%),
+            linear-gradient(180deg, #f8fbff 0%, #f4f7fb 48%, #edf3f9 100%);
+          color: var(--text);
+        }
+
+        .block-container {
+          padding-top: 1.4rem;
+          padding-bottom: 2rem;
+          max-width: 1440px;
+        }
+
+        [data-testid="stSidebar"] {
+          background: linear-gradient(180deg, #13213d 0%, #192c4f 100%);
+          border-right: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        [data-testid="stSidebar"] * {
+          color: #edf4ff;
+        }
+
+        [data-testid="stSidebar"] .stSelectbox label,
+        [data-testid="stSidebar"] .stButton button,
+        [data-testid="stSidebar"] .stCodeBlock,
+        [data-testid="stSidebar"] .stMarkdown,
+        [data-testid="stSidebar"] .stCaption {
+          color: inherit;
+        }
+
+        [data-testid="stMetric"] {
+          background: linear-gradient(180deg, var(--panel-bg) 0%, var(--panel-muted) 100%);
+          border: 1px solid var(--border);
+          border-radius: 18px;
+          box-shadow: var(--shadow);
+          padding: 0.95rem 1rem;
+        }
+
+        [data-testid="stMetricLabel"] {
+          color: var(--muted);
+          font-weight: 600;
+        }
+
+        [data-testid="stMetricValue"] {
+          color: var(--text);
+          font-weight: 800;
+        }
+
+        div[data-testid="stVerticalBlock"] div[data-testid="stVerticalBlockBorderWrapper"] {
+          border-radius: 22px;
+          border: 1px solid var(--border);
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(248, 251, 255, 0.98) 100%);
+          box-shadow: var(--shadow);
+        }
+
+        .stDataFrame, .stCodeBlock, .stTextArea textarea {
+          border-radius: 18px;
+        }
+
+        .stButton > button,
+        .stDownloadButton > button {
+          background: linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%);
+          color: #ffffff;
+          border: 1px solid rgba(14, 93, 221, 0.25);
+          border-radius: 14px;
+          font-weight: 700;
+          min-height: 2.8rem;
+          box-shadow: 0 12px 28px rgba(25, 118, 255, 0.28);
+          transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+          transform: translateY(-1px);
+          box-shadow:
+            0 0 0 1px rgba(255, 255, 255, 0.18) inset,
+            0 0 18px rgba(74, 156, 255, 0.42),
+            0 0 34px rgba(25, 118, 255, 0.26),
+            0 14px 32px rgba(25, 118, 255, 0.34);
+          filter: brightness(1.04);
+          animation: cta-flicker 0.7s ease-in-out infinite alternate;
+        }
+
+        .stButton > button:focus,
+        .stDownloadButton > button:focus {
+          outline: none;
+          box-shadow: 0 0 0 4px var(--brand-soft), 0 14px 30px rgba(25, 118, 255, 0.32);
+        }
+
+        @keyframes cta-flicker {
+          0% {
+            box-shadow:
+              0 0 0 1px rgba(255, 255, 255, 0.18) inset,
+              0 0 12px rgba(74, 156, 255, 0.28),
+              0 0 24px rgba(25, 118, 255, 0.18),
+              0 12px 28px rgba(25, 118, 255, 0.26);
+          }
+          100% {
+            box-shadow:
+              0 0 0 1px rgba(255, 255, 255, 0.2) inset,
+              0 0 22px rgba(107, 176, 255, 0.5),
+              0 0 40px rgba(25, 118, 255, 0.32),
+              0 16px 36px rgba(25, 118, 255, 0.36);
+          }
+        }
+
+        .dashboard-hero {
+          padding: 1.25rem 1.35rem;
+          border-radius: 24px;
+          background:
+            radial-gradient(circle at top right, rgba(138, 194, 255, 0.24), transparent 26%),
+            linear-gradient(135deg, #13213d 0%, #183562 52%, #1e4b8f 100%);
+          color: #f4f8ff;
+          box-shadow: 0 24px 55px rgba(19, 33, 61, 0.28);
+          margin-bottom: 1rem;
+        }
+
+        .dashboard-hero h1 {
+          margin: 0;
+          font-size: 2rem;
+          line-height: 1.1;
+          font-weight: 800;
+          color: #ffffff;
+        }
+
+        .dashboard-hero p {
+          margin: 0.45rem 0 0;
+          color: rgba(244, 248, 255, 0.84);
+          max-width: 52rem;
+        }
+
+        .dashboard-chip-row {
+          display: flex;
+          gap: 0.5rem;
+          flex-wrap: wrap;
+          margin-top: 0.85rem;
+        }
+
+        .dashboard-chip {
+          background: rgba(255, 255, 255, 0.12);
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          color: #f4f8ff;
+          border-radius: 999px;
+          font-size: 0.84rem;
+          font-weight: 700;
+          padding: 0.38rem 0.7rem;
+        }
+
+        @media (max-width: 900px) {
+          .block-container {
+            padding-top: 1rem;
+          }
+
+          .dashboard-hero h1 {
+            font-size: 1.5rem;
+          }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
@@ -87,8 +275,20 @@ def _ensure_dashboard_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS newsletter_run_configs (
+          newsletter_run_id INTEGER PRIMARY KEY,
+          newsletter_date TEXT,
+          config_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
     _ensure_column(connection, "newsletter_runs", "llm_instruction", "TEXT")
     _ensure_column(connection, "newsletter_runs", "llm_content", "TEXT")
+    _ensure_column(connection, "newsletter_runs", "output_html", "TEXT")
     connection.commit()
 
 
@@ -135,6 +335,87 @@ def load_newsletter_runs() -> list[dict[str, object]]:
     return runs
 
 
+def _parse_default_newsletter_date(raw_value: str) -> date:
+    value = str(raw_value or "").strip()
+    if not value:
+        return date.today()
+
+    for parser in (
+        lambda text: datetime.fromisoformat(text.replace("Z", "+00:00")).date(),
+        lambda text: datetime.strptime(text, "%Y%m%d-%H%M%S").date(),
+        lambda text: datetime.strptime(text, "%Y-%m-%d").date(),
+    ):
+        try:
+            return parser(value)
+        except ValueError:
+            continue
+    return date.today()
+
+
+def _default_run_config(run_timestamp: str) -> dict[str, object]:
+    return {
+        "newsletter_date": _parse_default_newsletter_date(run_timestamp).isoformat(),
+    }
+
+
+def _load_run_config(connection: sqlite3.Connection, newsletter_run_id: int, run_timestamp: str) -> dict[str, object]:
+    default_config = _default_run_config(run_timestamp)
+    row = connection.execute(
+        """
+        SELECT newsletter_date, config_json
+        FROM newsletter_run_configs
+        WHERE newsletter_run_id = ?
+        """,
+        (newsletter_run_id,),
+    ).fetchone()
+    if row is None:
+        return default_config
+
+    config = dict(default_config)
+    raw_config = row["config_json"]
+    if isinstance(raw_config, str) and raw_config.strip():
+        try:
+            loaded = json.loads(raw_config)
+            if isinstance(loaded, dict):
+                config.update(loaded)
+        except json.JSONDecodeError:
+            pass
+
+    newsletter_date = str(row["newsletter_date"] or "").strip()
+    if newsletter_date:
+        config["newsletter_date"] = newsletter_date
+    return config
+
+
+def save_run_config(newsletter_run_id: int, config: dict[str, object]) -> None:
+    with _open_connection() as connection:
+        current_timestamp = datetime.utcnow().isoformat() + "Z"
+        newsletter_date = str(config.get("newsletter_date") or "").strip() or None
+        connection.execute(
+            """
+            INSERT INTO newsletter_run_configs (
+              newsletter_run_id,
+              newsletter_date,
+              config_json,
+              created_at,
+              updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(newsletter_run_id) DO UPDATE SET
+              newsletter_date = excluded.newsletter_date,
+              config_json = excluded.config_json,
+              updated_at = excluded.updated_at
+            """,
+            (
+                newsletter_run_id,
+                newsletter_date,
+                json.dumps(config, ensure_ascii=True, default=str),
+                current_timestamp,
+                current_timestamp,
+            ),
+        )
+        connection.commit()
+
+
 @st.cache_data(show_spinner=False)
 def load_run_detail(newsletter_run_id: int) -> dict[str, object] | None:
     if not DB_PATH.exists():
@@ -143,7 +424,7 @@ def load_run_detail(newsletter_run_id: int) -> dict[str, object] | None:
     with _open_connection() as connection:
         run_row = connection.execute(
             """
-            SELECT newsletter_run_id, run_timestamp, output_markdown, output_json, created_at
+            SELECT newsletter_run_id, run_timestamp, output_markdown, output_html, output_json, created_at
             FROM newsletter_runs
             WHERE newsletter_run_id = ?
             """,
@@ -289,9 +570,157 @@ def load_run_detail(newsletter_run_id: int) -> dict[str, object] | None:
             "run_timestamp": str(run_row["run_timestamp"] or ""),
             "created_at": str(run_row["created_at"] or ""),
             "output_markdown": str(run_row["output_markdown"] or ""),
+            "output_html": str(run_row["output_html"] or ""),
             "output": output_payload,
+            "config": _load_run_config(
+                connection,
+                int(run_row["newsletter_run_id"]),
+                str(run_row["run_timestamp"] or ""),
+            ),
             "sectionizer_details": details_by_source_path,
         }
+
+
+def _configured_newsletter_date(detail: dict[str, object]) -> str:
+    config = detail.get("config")
+    if isinstance(config, dict):
+        configured = str(config.get("newsletter_date") or "").strip()
+        if configured:
+            return configured
+    return _default_run_config(str(detail.get("run_timestamp") or "")).get("newsletter_date", "")
+
+
+def _newsletter_html_bytes(detail: dict[str, object]) -> bytes:
+    output = detail.get("output")
+    sections = output.get("sections") if isinstance(output, dict) else {}
+    newsletter_date = escape(_configured_newsletter_date(detail))
+    parts: list[str] = [
+        "<!doctype html>",
+        "<html>",
+        "<head>",
+        "<meta charset=\"utf-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        "<title>Weekly Newsletter</title>",
+        "<style>",
+        "body{margin:0;background:#eef4fb;font-family:Arial,sans-serif;color:#1a2740;}",
+        ".shell{max-width:760px;margin:0 auto;padding:24px 14px 36px;}",
+        ".hero{background:linear-gradient(135deg,#16325c,#1b5bbf);color:#fff;border-radius:24px;padding:28px 24px;box-shadow:0 16px 42px rgba(18,46,87,.22);}",
+        ".hero h1{margin:0 0 8px;font-size:28px;line-height:1.1;}",
+        ".hero p{margin:0;color:rgba(255,255,255,.86);font-size:14px;}",
+        ".section{background:#fff;border-radius:22px;padding:22px 18px;margin-top:18px;box-shadow:0 10px 28px rgba(18,46,87,.08);}",
+        ".section h2{margin:0 0 14px;color:#16325c;font-size:22px;}",
+        ".story{padding:0 0 18px;margin:0 0 18px;border-bottom:1px solid #e3ebf4;}",
+        ".story:last-child{padding-bottom:0;margin-bottom:0;border-bottom:none;}",
+        ".story h3{margin:0 0 10px;font-size:20px;color:#10213f;}",
+        ".story p{margin:0 0 10px;line-height:1.65;font-size:15px;color:#31415f;}",
+        ".facts{margin:0;padding-left:18px;color:#31415f;}",
+        ".facts li{margin:0 0 7px;line-height:1.55;}",
+        ".image{margin:0 0 14px;}",
+        ".image img{width:100%;height:auto;border-radius:16px;display:block;}",
+        ".image figcaption{font-size:13px;color:#5d6c86;margin-top:8px;line-height:1.45;}",
+        "@media print{body{background:#fff}.shell{max-width:none;padding:0}.section,.hero{box-shadow:none;border:1px solid #d9e3ef}}",
+        "</style>",
+        "</head>",
+        "<body>",
+        "<div class=\"shell\">",
+        "<section class=\"hero\">",
+        "<h1>Weekly Newsletter</h1>",
+        f"<p>Edition date: {newsletter_date}</p>",
+        "</section>",
+    ]
+
+    if isinstance(sections, dict) and sections:
+        for section_name, section_payload in sections.items():
+            parts.append("<section class=\"section\">")
+            parts.append(f"<h2>{escape(str(section_name))}</h2>")
+            stories = section_payload.get("stories") if isinstance(section_payload, dict) else []
+            if isinstance(stories, list):
+                for story in stories:
+                    if not isinstance(story, dict):
+                        continue
+                    title = escape(str(story.get("newsletter_title") or "Untitled Story").strip())
+                    summary = escape(str(story.get("summary") or "").strip())
+                    image_path = str(story.get("image_path") or "").strip()
+                    image_caption = escape(str(story.get("image_caption") or "").strip())
+                    facts = story.get("summary_facts")
+
+                    parts.append("<article class=\"story\">")
+                    parts.append(f"<h3>{title}</h3>")
+                    if image_path:
+                        parts.append("<figure class=\"image\">")
+                        parts.append(f"<img src=\"{escape(Path(image_path).as_uri())}\" alt=\"{title}\">")
+                        if image_caption:
+                            parts.append(f"<figcaption>{image_caption}</figcaption>")
+                        parts.append("</figure>")
+                    if summary:
+                        parts.append(f"<p>{summary}</p>")
+                    if isinstance(facts, list):
+                        fact_items = [escape(str(fact).strip()) for fact in facts if str(fact).strip()]
+                        if fact_items:
+                            parts.append("<ul class=\"facts\">")
+                            parts.extend(f"<li>{fact_text}</li>" for fact_text in fact_items)
+                            parts.append("</ul>")
+                    parts.append("</article>")
+            parts.append("</section>")
+    else:
+        parts.append("<section class=\"section\"><p>No newsletter content available for this run.</p></section>")
+
+    parts.extend(["</div>", "</body>", "</html>"])
+    return "\n".join(parts).encode("utf-8")
+
+
+def _newsletter_pdf_bytes(detail: dict[str, object]) -> bytes:
+    output = detail.get("output")
+    sections = output.get("sections") if isinstance(output, dict) else {}
+    buffer = io.BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=0.6 * inch,
+        rightMargin=0.6 * inch,
+        topMargin=0.6 * inch,
+        bottomMargin=0.6 * inch,
+    )
+    styles = getSampleStyleSheet()
+    newsletter_date = _configured_newsletter_date(detail)
+    story: list[object] = [
+        Paragraph("Weekly Newsletter", styles["Title"]),
+        Spacer(1, 0.15 * inch),
+        Paragraph(f"Edition date: {newsletter_date}", styles["Normal"]),
+        Spacer(1, 0.2 * inch),
+    ]
+
+    if isinstance(sections, dict) and sections:
+        for section_name, section_payload in sections.items():
+            story.append(Paragraph(str(section_name), styles["Heading1"]))
+            story.append(Spacer(1, 0.1 * inch))
+            stories = section_payload.get("stories") if isinstance(section_payload, dict) else []
+            if isinstance(stories, list) and stories:
+                for item in stories:
+                    if not isinstance(item, dict):
+                        continue
+                    title = str(item.get("newsletter_title") or "Untitled Story").strip()
+                    summary = str(item.get("summary") or "").strip()
+                    facts = item.get("summary_facts")
+
+                    story.append(Paragraph(title, styles["Heading2"]))
+                    if summary:
+                        story.append(Paragraph(summary, styles["BodyText"]))
+                    if isinstance(facts, list):
+                        for fact in facts:
+                            fact_text = str(fact).strip()
+                            if fact_text:
+                                story.append(Paragraph(f"- {fact_text}", styles["BodyText"]))
+                    story.append(Spacer(1, 0.12 * inch))
+            else:
+                story.append(Paragraph("No stories in this section.", styles["BodyText"]))
+                story.append(Spacer(1, 0.12 * inch))
+    else:
+        markdown = str(detail.get("output_markdown") or "").strip() or "No newsletter content available for this run."
+        story.append(Paragraph(markdown.replace("\n", "<br/>"), styles["BodyText"]))
+
+    document.build(story)
+    return buffer.getvalue()
 
 
 def render_run_list(runs: list[dict[str, object]]) -> None:
@@ -355,6 +784,28 @@ def render_story_card(story: dict[str, object], related_detail: dict[str, object
             st.code(str(related_detail.get("llm_content") or ""), language="text")
 
 
+def render_run_configuration(detail: dict[str, object]) -> None:
+    config = detail.get("config") if isinstance(detail.get("config"), dict) else {}
+    newsletter_date = _parse_default_newsletter_date(str(config.get("newsletter_date") or detail.get("run_timestamp") or ""))
+
+    with st.form(f"newsletter-run-config-{detail['newsletter_run_id']}"):
+        st.subheader("Run Configuration")
+        st.caption("These settings are persisted per newsletter run and drive the review exports.")
+        selected_date = st.date_input("Newsletter date", value=newsletter_date, format="YYYY-MM-DD")
+        submitted = st.form_submit_button("Save configuration", use_container_width=True)
+
+    if submitted:
+        save_run_config(
+            int(detail["newsletter_run_id"]),
+            {
+                "newsletter_date": selected_date.isoformat(),
+            },
+        )
+        st.cache_data.clear()
+        st.success("Newsletter configuration saved.")
+        st.rerun()
+
+
 def render_run_detail(detail: dict[str, object]) -> None:
     output = detail["output"] if isinstance(detail["output"], dict) else {}
     sections = output.get("sections") if isinstance(output, dict) else {}
@@ -364,30 +815,51 @@ def render_run_detail(detail: dict[str, object]) -> None:
     meta_cols = st.columns(3)
     meta_cols[0].metric("Run Timestamp", str(detail["run_timestamp"]))
     meta_cols[1].metric("Created At", str(detail["created_at"]))
-    meta_cols[2].metric("Sections", str(output.get("sectionCount") or 0))
+    meta_cols[2].metric("Newsletter Date", _configured_newsletter_date(detail))
 
-    if isinstance(sections, dict):
-        selected_sections = list(sections.keys())
-        st.markdown("**Sections selected for the newsletter**")
-        st.write(", ".join(selected_sections) if selected_sections else "None")
+    export_cols = st.columns(2)
+    export_cols[0].download_button(
+        "Download HTML",
+        data=_newsletter_html_bytes(detail),
+        file_name=f"newsletter_run_{detail['newsletter_run_id']}.html",
+        mime="text/html",
+        use_container_width=True,
+    )
+    export_cols[1].download_button(
+        "Download PDF",
+        data=_newsletter_pdf_bytes(detail),
+        file_name=f"newsletter_run_{detail['newsletter_run_id']}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
 
-        for section_name, section_payload in sections.items():
-            with st.container(border=True):
-                st.header(str(section_name))
-                st.caption(f"Stories: {section_payload.get('storyCount') if isinstance(section_payload, dict) else 0}")
-                stories = section_payload.get("stories") if isinstance(section_payload, dict) else []
-                if isinstance(stories, list):
-                    for story in stories:
-                        if not isinstance(story, dict):
-                            continue
-                        source_path = str(story.get("source_path") or "").strip()
-                        related_detail = sectionizer_details.get(source_path) if isinstance(sectionizer_details, dict) else None
-                        render_story_card(story, related_detail if isinstance(related_detail, dict) else None)
-                        st.divider()
-    else:
-        st.info("No sections found for this run.")
+    overview_tab, config_tab, markdown_tab = st.tabs(["Overview", "Configuration", "Rendered Markdown"])
+    with overview_tab:
+        if isinstance(sections, dict):
+            selected_sections = list(sections.keys())
+            st.markdown("**Sections selected for the newsletter**")
+            st.write(", ".join(selected_sections) if selected_sections else "None")
 
-    with st.expander("Rendered Markdown", expanded=False):
+            for section_name, section_payload in sections.items():
+                with st.container(border=True):
+                    st.header(str(section_name))
+                    st.caption(f"Stories: {section_payload.get('storyCount') if isinstance(section_payload, dict) else 0}")
+                    stories = section_payload.get("stories") if isinstance(section_payload, dict) else []
+                    if isinstance(stories, list):
+                        for story in stories:
+                            if not isinstance(story, dict):
+                                continue
+                            source_path = str(story.get("source_path") or "").strip()
+                            related_detail = sectionizer_details.get(source_path) if isinstance(sectionizer_details, dict) else None
+                            render_story_card(story, related_detail if isinstance(related_detail, dict) else None)
+                            st.divider()
+        else:
+            st.info("No sections found for this run.")
+
+    with config_tab:
+        render_run_configuration(detail)
+
+    with markdown_tab:
         st.code(str(detail["output_markdown"] or ""), language="markdown")
 
 
@@ -404,6 +876,9 @@ def render_pipeline_controls() -> None:
                     text=True,
                 )
         st.cache_data.clear()
+        refreshed_runs = load_newsletter_runs()
+        if refreshed_runs:
+            st.session_state["selected_newsletter_run_id"] = int(refreshed_runs[0]["newsletter_run_id"])
         st.sidebar.success(f"Pipeline finished with exit code {result.returncode}")
         if result.stdout.strip():
             st.sidebar.markdown("**stdout**")
@@ -421,7 +896,24 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    st.title("Newsletter Observability")
+    apply_admin_theme()
+    st.markdown(
+        f"""
+        <section class="dashboard-hero">
+          <h1>Newsletter Observability</h1>
+          <p>
+            Review every newsletter run, trace each story back through the pipeline,
+            inspect scores and facts, and export polished review artifacts without leaving the dashboard.
+          </p>
+          <div class="dashboard-chip-row">
+            <span class="dashboard-chip">SQLite-backed lineage</span>
+            <span class="dashboard-chip">HTML + PDF review exports</span>
+            <span class="dashboard-chip">Source, image, and section traceability</span>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
     st.caption(f"SQLite source: {DB_PATH}")
     render_pipeline_controls()
 
@@ -431,18 +923,37 @@ def main() -> None:
     if not runs:
         return
 
+    latest_run = runs[0]
+    with st.container(border=True):
+        st.subheader("Latest Run Summary")
+        cols = st.columns(4)
+        cols[0].metric("Run ID", str(latest_run["newsletter_run_id"]))
+        cols[1].metric("Run Timestamp", str(latest_run["run_timestamp"]))
+        cols[2].metric("Sections", str(latest_run["section_count"]))
+        cols[3].metric("Stories", str(latest_run["story_count"]))
+        st.caption(f"Created at: {latest_run['created_at']}")
+
     run_options = {
         f"Run #{run['newsletter_run_id']} | {run['run_timestamp']} | sections={run['section_count']} stories={run['story_count']}": int(
             run["newsletter_run_id"]
         )
         for run in runs
     }
-    selected_label = st.sidebar.selectbox("Select newsletter run", list(run_options.keys()))
+    selected_run_id_from_state = st.session_state.get("selected_newsletter_run_id")
+    option_labels = list(run_options.keys())
+    default_index = 0
+    if isinstance(selected_run_id_from_state, int):
+        for index, label in enumerate(option_labels):
+            if run_options[label] == selected_run_id_from_state:
+                default_index = index
+                break
+    selected_label = st.sidebar.selectbox("Select newsletter run", option_labels, index=default_index)
     if st.sidebar.button("Refresh data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
     selected_run_id = run_options[selected_label]
+    st.session_state["selected_newsletter_run_id"] = selected_run_id
     detail = load_run_detail(selected_run_id)
     if detail is None:
         st.error("Selected run could not be loaded from the database.")
