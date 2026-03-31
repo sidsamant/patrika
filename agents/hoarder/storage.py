@@ -43,6 +43,19 @@ def ensure_hoarder_outputs_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hoarder_source_runs (
+          hoarder_source_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_id TEXT NOT NULL,
+          source_path TEXT,
+          status TEXT NOT NULL,
+          item_count INTEGER,
+          error_text TEXT,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
     _ensure_column(connection, "hoarder_outputs", "screened_at", "TEXT")
     connection.commit()
 
@@ -169,3 +182,40 @@ def mark_hoarder_rows_screened(hoarder_output_ids: list[int]) -> str | None:
         connection.commit()
 
     return screened_at
+
+
+def record_hoarder_source_run(
+    *,
+    source_id: str,
+    source_path: str | None,
+    status: str,
+    item_count: int | None = None,
+    error_text: str | None = None,
+) -> int:
+    """Append one hoarder source-agent run record for dashboard observability."""
+    created_at = _utc_now_iso()
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DB_PATH) as connection:
+        ensure_hoarder_outputs_schema(connection)
+        cursor = connection.execute(
+            """
+            INSERT INTO hoarder_source_runs (
+              source_id,
+              source_path,
+              status,
+              item_count,
+              error_text,
+              created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id.strip(),
+                source_path.strip() if isinstance(source_path, str) and source_path.strip() else None,
+                status.strip(),
+                item_count,
+                error_text.strip() if isinstance(error_text, str) and error_text.strip() else None,
+                created_at,
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)

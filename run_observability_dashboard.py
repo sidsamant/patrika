@@ -14,10 +14,12 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 import streamlit as st
+from agents.hoarder.config import load_hoarder_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 RUN_PIPELINE_PATH = PROJECT_ROOT / "run_pipeline.py"
+RUN_HOARDER_SOURCE_PATH = PROJECT_ROOT / "run_hoarder_source.py"
 
 
 def apply_admin_theme() -> None:
@@ -254,6 +256,19 @@ def _ensure_dashboard_schema(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS hoarder_source_runs (
+          hoarder_source_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_id TEXT NOT NULL,
+          source_path TEXT,
+          status TEXT NOT NULL,
+          item_count INTEGER,
+          error_text TEXT,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS newsletter_runs (
           newsletter_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
           run_timestamp TEXT NOT NULL,
@@ -333,6 +348,175 @@ def load_newsletter_runs() -> list[dict[str, object]]:
                 }
             )
     return runs
+
+
+@st.cache_data(show_spinner=False)
+def load_pending_screener_items() -> list[dict[str, object]]:
+    if not DB_PATH.exists():
+        return []
+
+    with _open_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              hoarder_output_id,
+              source_id,
+              name,
+              source_path,
+              created_at,
+              screened_at
+            FROM hoarder_outputs
+            WHERE screened_at IS NULL
+            ORDER BY hoarder_output_id ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@st.cache_data(show_spinner=False)
+def load_hoarder_source_statuses() -> list[dict[str, object]]:
+    config = load_hoarder_config()
+    sources = config.sources
+    latest_runs_by_source_id: dict[str, dict[str, object]] = {}
+
+    if DB_PATH.exists():
+        with _open_connection() as connection:
+            rows = connection.execute(
+                """
+                WITH ranked_runs AS (
+                  SELECT
+                    hoarder_source_run_id,
+                    source_id,
+                    source_path,
+                    status,
+                    item_count,
+                    error_text,
+                    created_at,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY source_id
+                      ORDER BY hoarder_source_run_id DESC
+                    ) AS source_rank
+                  FROM hoarder_source_runs
+                )
+                SELECT
+                  hoarder_source_run_id,
+                  source_id,
+                  source_path,
+                  status,
+                  item_count,
+                  error_text,
+                  created_at
+                FROM ranked_runs
+                WHERE source_rank = 1
+                """
+            ).fetchall()
+        latest_runs_by_source_id = {str(row["source_id"]): dict(row) for row in rows}
+
+    statuses: list[dict[str, object]] = []
+    for source in sources:
+        last_run = latest_runs_by_source_id.get(source.id, {})
+        statuses.append(
+            {
+                "source_id": source.id,
+                "enabled": source.enabled,
+                "source_path": source.path,
+                "last_run_at": str(last_run.get("created_at") or ""),
+                "last_status": str(last_run.get("status") or ""),
+                "last_item_count": last_run.get("item_count"),
+                "last_error": str(last_run.get("error_text") or ""),
+            }
+        )
+    return statuses
+
+
+@st.cache_data(show_spinner=False)
+def load_pending_standardizer_items() -> list[dict[str, object]]:
+    if not DB_PATH.exists():
+        return []
+
+    with _open_connection() as connection:
+        rows = connection.execute(
+            """
+            WITH ranked_screened_files AS (
+              SELECT
+                screened_file_id,
+                hoarder_output_id,
+                name,
+                source_path,
+                source_created_at,
+                source_modified_at,
+                created_at,
+                processed_at,
+                rejection_reason,
+                ROW_NUMBER() OVER (
+                  PARTITION BY COALESCE(NULLIF(LOWER(TRIM(source_path)), ''), 'screened_file:' || CAST(screened_file_id AS TEXT))
+                  ORDER BY screened_file_id DESC
+                ) AS source_rank
+              FROM screened_files
+              WHERE is_selected = 1
+                AND processed_at IS NULL
+            )
+            SELECT
+              screened_file_id,
+              hoarder_output_id,
+              name,
+              source_path,
+              source_created_at,
+              source_modified_at,
+              created_at,
+              rejection_reason
+            FROM ranked_screened_files
+            WHERE source_rank = 1
+            ORDER BY screened_file_id ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@st.cache_data(show_spinner=False)
+def load_pending_sectionizer_items() -> list[dict[str, object]]:
+    if not DB_PATH.exists():
+        return []
+
+    with _open_connection() as connection:
+        rows = connection.execute(
+            """
+            WITH ranked_documents AS (
+              SELECT
+                d.doc_id,
+                d.source_path,
+                d.author,
+                d.extraction_status,
+                d.modified_at,
+                d.created_at,
+                d.persisted_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY COALESCE(NULLIF(LOWER(TRIM(d.source_path)), ''), 'doc:' || CAST(d.doc_id AS TEXT))
+                  ORDER BY d.doc_id DESC
+                ) AS source_rank
+              FROM documents d
+              WHERE d.text_content IS NOT NULL
+                AND TRIM(d.text_content) <> ''
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM sectionizer_outputs so
+                  WHERE so.doc_id = d.doc_id
+                )
+            )
+            SELECT
+              doc_id,
+              source_path,
+              author,
+              extraction_status,
+              modified_at,
+              created_at,
+              persisted_at
+            FROM ranked_documents
+            WHERE source_rank = 1
+            ORDER BY doc_id ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _parse_default_newsletter_date(raw_value: str) -> date:
@@ -731,6 +915,76 @@ def render_run_list(runs: list[dict[str, object]]) -> None:
     st.dataframe(runs, use_container_width=True, hide_index=True)
 
 
+def render_pending_queue(
+    *,
+    stage_name: str,
+    queue_items: list[dict[str, object]],
+    empty_message: str,
+) -> None:
+    st.subheader(stage_name)
+    st.caption("Pending items are listed in execution order and reflect the rows the stage can act on next.")
+    st.metric("Pending items", str(len(queue_items)))
+    if not queue_items:
+        st.success(empty_message)
+        return
+    st.dataframe(queue_items, use_container_width=True, hide_index=True)
+
+
+def render_hoarder_sources_page() -> None:
+    st.subheader("Hoarder Source Agents")
+    st.caption("Trigger individual hoarder source agents and inspect the latest run recorded for each source.")
+    statuses = load_hoarder_source_statuses()
+    if not statuses:
+        st.info("No hoarder sources are configured.")
+        return
+
+    summary_rows = [
+        {
+            "source_id": item["source_id"],
+            "enabled": item["enabled"],
+            "source_path": item["source_path"],
+            "last_run_at": item["last_run_at"],
+            "last_status": item["last_status"],
+            "last_item_count": item["last_item_count"],
+        }
+        for item in statuses
+    ]
+    st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+
+    for source in statuses:
+        with st.container(border=True):
+            cols = st.columns([2, 1, 1, 1])
+            cols[0].markdown(f"### `{source['source_id']}`")
+            cols[0].caption(str(source["source_path"]))
+            cols[1].metric("Enabled", "Yes" if bool(source["enabled"]) else "No")
+            cols[2].metric("Last Status", str(source["last_status"] or "Never"))
+            cols[3].metric("Last Run", str(source["last_run_at"] or "Never"))
+
+            run_label = f"Run {source['source_id']}"
+            if st.button(run_label, key=f"run-hoarder-source-{source['source_id']}", use_container_width=True):
+                with st.spinner(f"Running hoarder source {source['source_id']}..."):
+                    result = subprocess.run(
+                        [sys.executable, str(RUN_HOARDER_SOURCE_PATH), "--source-id", str(source["source_id"])],
+                        cwd=str(PROJECT_ROOT),
+                        capture_output=True,
+                        text=True,
+                    )
+                st.cache_data.clear()
+                if result.returncode == 0:
+                    st.success(f"Hoarder source {source['source_id']} finished successfully.")
+                else:
+                    st.error(f"Hoarder source {source['source_id']} failed with exit code {result.returncode}.")
+                if result.stdout.strip():
+                    st.code(result.stdout[-12000:], language="text")
+                if result.stderr.strip():
+                    st.code(result.stderr[-12000:], language="text")
+                st.rerun()
+
+            if source["last_error"]:
+                with st.expander("Last error", expanded=False):
+                    st.code(str(source["last_error"]), language="text")
+
+
 def render_story_card(story: dict[str, object], related_detail: dict[str, object] | None) -> None:
     title = str(story.get("newsletter_title") or "Untitled Story").strip()
     st.markdown(f"### {title}")
@@ -916,50 +1170,90 @@ def main() -> None:
     )
     st.caption(f"SQLite source: {DB_PATH}")
     render_pipeline_controls()
-
-    runs = load_newsletter_runs()
-    render_run_list(runs)
-
-    if not runs:
-        return
-
-    latest_run = runs[0]
-    with st.container(border=True):
-        st.subheader("Latest Run Summary")
-        cols = st.columns(4)
-        cols[0].metric("Run ID", str(latest_run["newsletter_run_id"]))
-        cols[1].metric("Run Timestamp", str(latest_run["run_timestamp"]))
-        cols[2].metric("Sections", str(latest_run["section_count"]))
-        cols[3].metric("Stories", str(latest_run["story_count"]))
-        st.caption(f"Created at: {latest_run['created_at']}")
-
-    run_options = {
-        f"Run #{run['newsletter_run_id']} | {run['run_timestamp']} | sections={run['section_count']} stories={run['story_count']}": int(
-            run["newsletter_run_id"]
-        )
-        for run in runs
-    }
-    selected_run_id_from_state = st.session_state.get("selected_newsletter_run_id")
-    option_labels = list(run_options.keys())
-    default_index = 0
-    if isinstance(selected_run_id_from_state, int):
-        for index, label in enumerate(option_labels):
-            if run_options[label] == selected_run_id_from_state:
-                default_index = index
-                break
-    selected_label = st.sidebar.selectbox("Select newsletter run", option_labels, index=default_index)
     if st.sidebar.button("Refresh data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-    selected_run_id = run_options[selected_label]
-    st.session_state["selected_newsletter_run_id"] = selected_run_id
-    detail = load_run_detail(selected_run_id)
-    if detail is None:
-        st.error("Selected run could not be loaded from the database.")
-        return
+    screener_pending = load_pending_screener_items()
+    standardizer_pending = load_pending_standardizer_items()
+    sectionizer_pending = load_pending_sectionizer_items()
+    runs = load_newsletter_runs()
 
-    render_run_detail(detail)
+    hoarder_tab, screener_tab, standardizer_tab, sectionizer_tab, newsletter_tab = st.tabs(
+        [
+            "1. Hoarder",
+            "2. Screener",
+            "3. Standardizer",
+            "4. Sectionizer",
+            "5. Newsletter",
+        ]
+    )
+
+    with hoarder_tab:
+        render_hoarder_sources_page()
+
+    with screener_tab:
+        render_pending_queue(
+            stage_name="Pending For Screener",
+            queue_items=screener_pending,
+            empty_message="No hoarder rows are waiting for the screener.",
+        )
+
+    with standardizer_tab:
+        render_pending_queue(
+            stage_name="Pending For Standardizer",
+            queue_items=standardizer_pending,
+            empty_message="No selected screener rows are waiting for standardization.",
+        )
+
+    with sectionizer_tab:
+        render_pending_queue(
+            stage_name="Pending For Sectionizer",
+            queue_items=sectionizer_pending,
+            empty_message="No standardized documents are waiting for sectionization.",
+        )
+
+    with newsletter_tab:
+        render_run_list(runs)
+
+        if not runs:
+            st.info("No newsletter runs found yet.")
+            return
+
+        latest_run = runs[0]
+        with st.container(border=True):
+            st.subheader("Latest Run Summary")
+            cols = st.columns(4)
+            cols[0].metric("Run ID", str(latest_run["newsletter_run_id"]))
+            cols[1].metric("Run Timestamp", str(latest_run["run_timestamp"]))
+            cols[2].metric("Sections", str(latest_run["section_count"]))
+            cols[3].metric("Stories", str(latest_run["story_count"]))
+            st.caption(f"Created at: {latest_run['created_at']}")
+
+        run_options = {
+            f"Run #{run['newsletter_run_id']} | {run['run_timestamp']} | sections={run['section_count']} stories={run['story_count']}": int(
+                run["newsletter_run_id"]
+            )
+            for run in runs
+        }
+        selected_run_id_from_state = st.session_state.get("selected_newsletter_run_id")
+        option_labels = list(run_options.keys())
+        default_index = 0
+        if isinstance(selected_run_id_from_state, int):
+            for index, label in enumerate(option_labels):
+                if run_options[label] == selected_run_id_from_state:
+                    default_index = index
+                    break
+        selected_label = st.sidebar.selectbox("Select newsletter run", option_labels, index=default_index)
+
+        selected_run_id = run_options[selected_label]
+        st.session_state["selected_newsletter_run_id"] = selected_run_id
+        detail = load_run_detail(selected_run_id)
+        if detail is None:
+            st.error("Selected run could not be loaded from the database.")
+            return
+
+        render_run_detail(detail)
 
 
 if __name__ == "__main__":

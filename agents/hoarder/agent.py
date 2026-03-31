@@ -55,7 +55,7 @@ logger = _configure_logging()
 load_dotenv(ENV_PATH)
 
 
-def _build_source_agent(source: SourceConfig):
+def build_hoarder_source_agent(source: SourceConfig):
     """Create the sub-agent responsible for one enabled hoarder source."""
     builders = {
         "filesystem": create_filesource_hoarder_agent,
@@ -76,7 +76,7 @@ def _load_enabled_sub_agents():
     config = load_hoarder_config()
     enabled_sources = [source for source in config.sources if source.enabled]
     logger.debug("Building hoarder sub-agents for %d enabled sources", len(enabled_sources))
-    return [_build_source_agent(source) for source in enabled_sources]
+    return [build_hoarder_source_agent(source) for source in enabled_sources]
 
 
 class PersistentHoarderSequentialAgent(SequentialAgent):
