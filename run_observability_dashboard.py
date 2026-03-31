@@ -426,7 +426,13 @@ def load_hoarder_source_statuses() -> list[dict[str, object]]:
                 "last_error": str(last_run.get("error_text") or ""),
             }
         )
-    return statuses
+    return sorted(
+        statuses,
+        key=lambda item: (
+            0 if bool(item["enabled"]) else 1,
+            str(item["source_id"]).lower(),
+        ),
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -961,7 +967,12 @@ def render_hoarder_sources_page() -> None:
             cols[3].metric("Last Run", str(source["last_run_at"] or "Never"))
 
             run_label = f"Run {source['source_id']}"
-            if st.button(run_label, key=f"run-hoarder-source-{source['source_id']}", use_container_width=True):
+            if st.button(
+                run_label,
+                key=f"run-hoarder-source-{source['source_id']}",
+                use_container_width=True,
+                disabled=not bool(source["enabled"]),
+            ):
                 with st.spinner(f"Running hoarder source {source['source_id']}..."):
                     result = subprocess.run(
                         [sys.executable, str(RUN_HOARDER_SOURCE_PATH), "--source-id", str(source["source_id"])],
@@ -979,6 +990,9 @@ def render_hoarder_sources_page() -> None:
                 if result.stderr.strip():
                     st.code(result.stderr[-12000:], language="text")
                 st.rerun()
+
+            if not bool(source["enabled"]):
+                st.caption("This source is disabled in hoarder config, so its run button is unavailable.")
 
             if source["last_error"]:
                 with st.expander("Last error", expanded=False):

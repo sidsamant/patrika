@@ -10,3 +10,5 @@ README.md
 *.pyc
 data
 .output
+demofiles
+.vscode/settings.json
