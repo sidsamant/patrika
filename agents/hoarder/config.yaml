@@ -1,6 +1,6 @@
 sources:
   - id: filesystem
-    enabled: true
+    enabled: false
     path: "D:/ai/newsletter_adk/demofiles/space"
 
   - id: confluence
@@ -22,3 +22,11 @@ sources:
   - id: whatsapp
     enabled: false
     path: "./data/whatsapp"
+
+  - id: websource
+    enabled: true
+    path: "D:/ai/crawl4ai/data/crawler.sqlite3"
+
+  - id: twitter
+    enabled: false
+    path: "D:/ai/crawl4ai/data/crawler.sqlite3"
