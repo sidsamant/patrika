@@ -40,7 +40,7 @@ async def main() -> None:
     parser.add_argument("--source-id", required=True, help="Configured hoarder source id to execute.")
     args = parser.parse_args()
 
-    from agents.hoarder.agent import build_hoarder_source_agent
+    from agents.hoarder.agent import PersistentHoarderSequentialAgent, build_hoarder_source_agent
     from agents.hoarder.config import load_hoarder_config
     from agents.hoarder.storage import record_hoarder_source_run
 
@@ -49,7 +49,11 @@ async def main() -> None:
     if source is None:
         raise ValueError(f"Unknown hoarder source id: {args.source_id}")
 
-    source_agent = build_hoarder_source_agent(source)
+    source_agent = PersistentHoarderSequentialAgent(
+        name=f"{source.id}_hoarder_coordinator",
+        description=f"Single-source hoarder coordinator for {source.id}.",
+        sub_agents=[build_hoarder_source_agent(source)],
+    )
     session_service = InMemorySessionService()
     await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
 
@@ -74,7 +78,16 @@ async def main() -> None:
             item_count=item_count,
             error_text=None,
         )
-        print(json.dumps({"sourceId": source.id, "status": "success", "itemCount": item_count}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "sourceId": source.id,
+                    "status": "success",
+                    "itemCount": item_count,
+                },
+                indent=2,
+            )
+        )
     except Exception as error:
         record_hoarder_source_run(
             source_id=source.id,

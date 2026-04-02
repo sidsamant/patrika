@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import io
-import sqlite3
 import subprocess
 from datetime import date, datetime
 from html import escape
@@ -15,11 +14,21 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 import streamlit as st
 from agents.hoarder.config import load_hoarder_config
+from sqlalchemy import select, text
+
+from db.standardizer_db import (
+    HoarderOutput,
+    NewsletterRun,
+    NewsletterRunConfig,
+    ensure_standardizer_schema,
+    session_scope,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 RUN_PIPELINE_PATH = PROJECT_ROOT / "run_pipeline.py"
 RUN_HOARDER_SOURCE_PATH = PROJECT_ROOT / "run_hoarder_source.py"
+RUN_SCREENER_PATH = PROJECT_ROOT / "run_screener.py"
 
 
 def apply_admin_theme() -> None:
@@ -203,115 +212,8 @@ def apply_admin_theme() -> None:
     )
 
 
-def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
-    existing_columns = {
-        str(row[1])
-        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-        if len(row) > 1
-    }
-    if column_name not in existing_columns:
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
-
-
-def _ensure_dashboard_schema(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sectionizer_output_documents (
-          sectionizer_output_document_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          sectionizer_output_id INTEGER NOT NULL,
-          doc_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS document_screened_files (
-          document_screened_file_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          doc_id INTEGER NOT NULL,
-          screened_file_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS hoarder_output_media_assets (
-          hoarder_output_media_asset_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          hoarder_output_id INTEGER NOT NULL,
-          media_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS screened_file_hoarder_outputs (
-          screened_file_hoarder_output_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          screened_file_id INTEGER NOT NULL,
-          hoarder_output_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS hoarder_source_runs (
-          hoarder_source_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          source_id TEXT NOT NULL,
-          source_path TEXT,
-          status TEXT NOT NULL,
-          item_count INTEGER,
-          error_text TEXT,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS newsletter_runs (
-          newsletter_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          run_timestamp TEXT NOT NULL,
-          llm_instruction TEXT,
-          llm_content TEXT,
-          output_markdown TEXT NOT NULL,
-          output_json TEXT NOT NULL,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS newsletter_run_sectionizer_outputs (
-          newsletter_run_sectionizer_output_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          newsletter_run_id INTEGER NOT NULL,
-          sectionizer_output_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS newsletter_run_configs (
-          newsletter_run_id INTEGER PRIMARY KEY,
-          newsletter_date TEXT,
-          config_json TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-        """
-    )
-    _ensure_column(connection, "newsletter_runs", "llm_instruction", "TEXT")
-    _ensure_column(connection, "newsletter_runs", "llm_content", "TEXT")
-    _ensure_column(connection, "newsletter_runs", "output_html", "TEXT")
-    connection.commit()
-
-
-def _open_connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    _ensure_dashboard_schema(connection)
-    return connection
+def _ensure_dashboard_schema() -> None:
+    ensure_standardizer_schema()
 
 
 @st.cache_data(show_spinner=False)
@@ -320,17 +222,14 @@ def load_newsletter_runs() -> list[dict[str, object]]:
         return []
 
     runs: list[dict[str, object]] = []
-    with _open_connection() as connection:
-        cursor = connection.execute(
-            """
-            SELECT newsletter_run_id, run_timestamp, output_json, created_at
-            FROM newsletter_runs
-            ORDER BY newsletter_run_id DESC
-            """
-        )
-        for row in cursor.fetchall():
+    _ensure_dashboard_schema()
+    with session_scope() as session:
+        rows = session.execute(
+            select(NewsletterRun).order_by(NewsletterRun.newsletter_run_id.desc())
+        ).scalars().all()
+        for row in rows:
             output_payload: dict[str, object] = {}
-            raw_output = row["output_json"]
+            raw_output = row.output_json
             if isinstance(raw_output, str) and raw_output.strip():
                 try:
                     loaded = json.loads(raw_output)
@@ -340,9 +239,9 @@ def load_newsletter_runs() -> list[dict[str, object]]:
                     output_payload = {}
             runs.append(
                 {
-                    "newsletter_run_id": int(row["newsletter_run_id"]),
-                    "run_timestamp": str(row["run_timestamp"] or ""),
-                    "created_at": str(row["created_at"] or ""),
+                    "newsletter_run_id": int(row.newsletter_run_id),
+                    "run_timestamp": str(row.run_timestamp or ""),
+                    "created_at": str(row.created_at or ""),
                     "section_count": int(output_payload.get("sectionCount") or 0),
                     "story_count": int(output_payload.get("storyCount") or 0),
                 }
@@ -355,22 +254,24 @@ def load_pending_screener_items() -> list[dict[str, object]]:
     if not DB_PATH.exists():
         return []
 
-    with _open_connection() as connection:
-        rows = connection.execute(
-            """
-            SELECT
-              hoarder_output_id,
-              source_id,
-              name,
-              source_path,
-              created_at,
-              screened_at
-            FROM hoarder_outputs
-            WHERE screened_at IS NULL
-            ORDER BY hoarder_output_id ASC
-            """
-        ).fetchall()
-    return [dict(row) for row in rows]
+    _ensure_dashboard_schema()
+    with session_scope() as session:
+        rows = session.execute(
+            select(HoarderOutput)
+            .where(HoarderOutput.screened_at.is_(None))
+            .order_by(HoarderOutput.hoarder_output_id.asc())
+        ).scalars().all()
+    return [
+        {
+            "hoarder_output_id": row.hoarder_output_id,
+            "source_id": row.source_id,
+            "name": row.name,
+            "source_path": row.source_path,
+            "created_at": row.created_at,
+            "screened_at": row.screened_at,
+        }
+        for row in rows
+    ]
 
 
 @st.cache_data(show_spinner=False)
@@ -380,37 +281,40 @@ def load_hoarder_source_statuses() -> list[dict[str, object]]:
     latest_runs_by_source_id: dict[str, dict[str, object]] = {}
 
     if DB_PATH.exists():
-        with _open_connection() as connection:
-            rows = connection.execute(
-                """
-                WITH ranked_runs AS (
-                  SELECT
-                    hoarder_source_run_id,
-                    source_id,
-                    source_path,
-                    status,
-                    item_count,
-                    error_text,
-                    created_at,
-                    ROW_NUMBER() OVER (
-                      PARTITION BY source_id
-                      ORDER BY hoarder_source_run_id DESC
-                    ) AS source_rank
-                  FROM hoarder_source_runs
+        _ensure_dashboard_schema()
+        with session_scope() as session:
+            rows = session.execute(
+                text(
+                    """
+                    WITH ranked_runs AS (
+                      SELECT
+                        hoarder_source_run_id,
+                        source_id,
+                        source_path,
+                        status,
+                        item_count,
+                        error_text,
+                        created_at,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY source_id
+                          ORDER BY hoarder_source_run_id DESC
+                        ) AS source_rank
+                      FROM hoarder_source_runs
+                    )
+                    SELECT
+                      hoarder_source_run_id,
+                      source_id,
+                      source_path,
+                      status,
+                      item_count,
+                      error_text,
+                      created_at
+                    FROM ranked_runs
+                    WHERE source_rank = 1
+                    """
                 )
-                SELECT
-                  hoarder_source_run_id,
-                  source_id,
-                  source_path,
-                  status,
-                  item_count,
-                  error_text,
-                  created_at
-                FROM ranked_runs
-                WHERE source_rank = 1
-                """
-            ).fetchall()
-        latest_runs_by_source_id = {str(row["source_id"]): dict(row) for row in rows}
+            ).all()
+        latest_runs_by_source_id = {str(row.source_id): dict(row._mapping) for row in rows}
 
     statuses: list[dict[str, object]] = []
     for source in sources:
@@ -440,43 +344,46 @@ def load_pending_standardizer_items() -> list[dict[str, object]]:
     if not DB_PATH.exists():
         return []
 
-    with _open_connection() as connection:
-        rows = connection.execute(
-            """
-            WITH ranked_screened_files AS (
-              SELECT
-                screened_file_id,
-                hoarder_output_id,
-                name,
-                source_path,
-                source_created_at,
-                source_modified_at,
-                created_at,
-                processed_at,
-                rejection_reason,
-                ROW_NUMBER() OVER (
-                  PARTITION BY COALESCE(NULLIF(LOWER(TRIM(source_path)), ''), 'screened_file:' || CAST(screened_file_id AS TEXT))
-                  ORDER BY screened_file_id DESC
-                ) AS source_rank
-              FROM screened_files
-              WHERE is_selected = 1
-                AND processed_at IS NULL
+    _ensure_dashboard_schema()
+    with session_scope() as session:
+        rows = session.execute(
+            text(
+                """
+                WITH ranked_screened_files AS (
+                  SELECT
+                    screened_file_id,
+                    hoarder_output_id,
+                    name,
+                    source_path,
+                    source_created_at,
+                    source_modified_at,
+                    created_at,
+                    processed_at,
+                    rejection_reason,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY COALESCE(NULLIF(LOWER(TRIM(source_path)), ''), 'screened_file:' || CAST(screened_file_id AS TEXT))
+                      ORDER BY screened_file_id DESC
+                    ) AS source_rank
+                  FROM screened_files
+                  WHERE is_selected = 1
+                    AND processed_at IS NULL
+                )
+                SELECT
+                  screened_file_id,
+                  hoarder_output_id,
+                  name,
+                  source_path,
+                  source_created_at,
+                  source_modified_at,
+                  created_at,
+                  rejection_reason
+                FROM ranked_screened_files
+                WHERE source_rank = 1
+                ORDER BY screened_file_id ASC
+                """
             )
-            SELECT
-              screened_file_id,
-              hoarder_output_id,
-              name,
-              source_path,
-              source_created_at,
-              source_modified_at,
-              created_at,
-              rejection_reason
-            FROM ranked_screened_files
-            WHERE source_rank = 1
-            ORDER BY screened_file_id ASC
-            """
-        ).fetchall()
-    return [dict(row) for row in rows]
+        ).all()
+    return [dict(row._mapping) for row in rows]
 
 
 @st.cache_data(show_spinner=False)
@@ -484,45 +391,48 @@ def load_pending_sectionizer_items() -> list[dict[str, object]]:
     if not DB_PATH.exists():
         return []
 
-    with _open_connection() as connection:
-        rows = connection.execute(
-            """
-            WITH ranked_documents AS (
-              SELECT
-                d.doc_id,
-                d.source_path,
-                d.author,
-                d.extraction_status,
-                d.modified_at,
-                d.created_at,
-                d.persisted_at,
-                ROW_NUMBER() OVER (
-                  PARTITION BY COALESCE(NULLIF(LOWER(TRIM(d.source_path)), ''), 'doc:' || CAST(d.doc_id AS TEXT))
-                  ORDER BY d.doc_id DESC
-                ) AS source_rank
-              FROM documents d
-              WHERE d.text_content IS NOT NULL
-                AND TRIM(d.text_content) <> ''
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM sectionizer_outputs so
-                  WHERE so.doc_id = d.doc_id
+    _ensure_dashboard_schema()
+    with session_scope() as session:
+        rows = session.execute(
+            text(
+                """
+                WITH ranked_documents AS (
+                  SELECT
+                    d.doc_id,
+                    d.source_path,
+                    d.author,
+                    d.extraction_status,
+                    d.modified_at,
+                    d.created_at,
+                    d.persisted_at,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY COALESCE(NULLIF(LOWER(TRIM(d.source_path)), ''), 'doc:' || CAST(d.doc_id AS TEXT))
+                      ORDER BY d.doc_id DESC
+                    ) AS source_rank
+                  FROM documents d
+                  WHERE d.text_content IS NOT NULL
+                    AND TRIM(d.text_content) <> ''
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM sectionizer_outputs so
+                      WHERE so.doc_id = d.doc_id
+                    )
                 )
+                SELECT
+                  doc_id,
+                  source_path,
+                  author,
+                  extraction_status,
+                  modified_at,
+                  created_at,
+                  persisted_at
+                FROM ranked_documents
+                WHERE source_rank = 1
+                ORDER BY doc_id ASC
+                """
             )
-            SELECT
-              doc_id,
-              source_path,
-              author,
-              extraction_status,
-              modified_at,
-              created_at,
-              persisted_at
-            FROM ranked_documents
-            WHERE source_rank = 1
-            ORDER BY doc_id ASC
-            """
-        ).fetchall()
-    return [dict(row) for row in rows]
+        ).all()
+    return [dict(row._mapping) for row in rows]
 
 
 def _parse_default_newsletter_date(raw_value: str) -> date:
@@ -548,21 +458,14 @@ def _default_run_config(run_timestamp: str) -> dict[str, object]:
     }
 
 
-def _load_run_config(connection: sqlite3.Connection, newsletter_run_id: int, run_timestamp: str) -> dict[str, object]:
+def _load_run_config(session: object, newsletter_run_id: int, run_timestamp: str) -> dict[str, object]:
     default_config = _default_run_config(run_timestamp)
-    row = connection.execute(
-        """
-        SELECT newsletter_date, config_json
-        FROM newsletter_run_configs
-        WHERE newsletter_run_id = ?
-        """,
-        (newsletter_run_id,),
-    ).fetchone()
+    row = session.get(NewsletterRunConfig, newsletter_run_id)
     if row is None:
         return default_config
 
     config = dict(default_config)
-    raw_config = row["config_json"]
+    raw_config = row.config_json
     if isinstance(raw_config, str) and raw_config.strip():
         try:
             loaded = json.loads(raw_config)
@@ -571,39 +474,31 @@ def _load_run_config(connection: sqlite3.Connection, newsletter_run_id: int, run
         except json.JSONDecodeError:
             pass
 
-    newsletter_date = str(row["newsletter_date"] or "").strip()
+    newsletter_date = str(row.newsletter_date or "").strip()
     if newsletter_date:
         config["newsletter_date"] = newsletter_date
     return config
 
 
 def save_run_config(newsletter_run_id: int, config: dict[str, object]) -> None:
-    with _open_connection() as connection:
+    _ensure_dashboard_schema()
+    with session_scope() as session:
         current_timestamp = datetime.utcnow().isoformat() + "Z"
         newsletter_date = str(config.get("newsletter_date") or "").strip() or None
-        connection.execute(
-            """
-            INSERT INTO newsletter_run_configs (
-              newsletter_run_id,
-              newsletter_date,
-              config_json,
-              created_at,
-              updated_at
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(newsletter_run_id) DO UPDATE SET
-              newsletter_date = excluded.newsletter_date,
-              config_json = excluded.config_json,
-              updated_at = excluded.updated_at
-            """,
-            (
-                newsletter_run_id,
-                newsletter_date,
-                json.dumps(config, ensure_ascii=True, default=str),
-                current_timestamp,
-                current_timestamp,
-            ),
-        )
-        connection.commit()
+        row = session.get(NewsletterRunConfig, newsletter_run_id)
+        if row is None:
+            row = NewsletterRunConfig(
+                newsletter_run_id=newsletter_run_id,
+                newsletter_date=newsletter_date,
+                config_json=json.dumps(config, ensure_ascii=True, default=str),
+                created_at=current_timestamp,
+                updated_at=current_timestamp,
+            )
+            session.add(row)
+        else:
+            row.newsletter_date = newsletter_date
+            row.config_json = json.dumps(config, ensure_ascii=True, default=str)
+            row.updated_at = current_timestamp
 
 
 @st.cache_data(show_spinner=False)
@@ -611,20 +506,14 @@ def load_run_detail(newsletter_run_id: int) -> dict[str, object] | None:
     if not DB_PATH.exists():
         return None
 
-    with _open_connection() as connection:
-        run_row = connection.execute(
-            """
-            SELECT newsletter_run_id, run_timestamp, output_markdown, output_html, output_json, created_at
-            FROM newsletter_runs
-            WHERE newsletter_run_id = ?
-            """,
-            (newsletter_run_id,),
-        ).fetchone()
+    _ensure_dashboard_schema()
+    with session_scope() as session:
+        run_row = session.get(NewsletterRun, newsletter_run_id)
         if run_row is None:
             return None
 
         output_payload: dict[str, object] = {}
-        raw_output = run_row["output_json"]
+        raw_output = run_row.output_json
         if isinstance(raw_output, str) and raw_output.strip():
             try:
                 loaded = json.loads(raw_output)
@@ -633,33 +522,35 @@ def load_run_detail(newsletter_run_id: int) -> dict[str, object] | None:
             except json.JSONDecodeError:
                 output_payload = {}
 
-        sectionizer_rows = connection.execute(
-            """
-            SELECT
-              so.sectionizer_output_id,
-              so.doc_id,
-              so.source_path,
-              so.llm_instruction,
-              so.llm_content,
-              so.output_json,
-              d.author
-            FROM newsletter_run_sectionizer_outputs nrso
-            JOIN sectionizer_outputs so
-              ON so.sectionizer_output_id = nrso.sectionizer_output_id
-            LEFT JOIN sectionizer_output_documents sod
-              ON sod.sectionizer_output_id = so.sectionizer_output_id
-            LEFT JOIN documents d
-              ON d.doc_id = sod.doc_id
-            WHERE nrso.newsletter_run_id = ?
-            ORDER BY nrso.newsletter_run_sectionizer_output_id ASC
-            """,
-            (newsletter_run_id,),
-        ).fetchall()
+        sectionizer_rows = session.execute(
+            text(
+                """
+                SELECT
+                  so.sectionizer_output_id,
+                  so.doc_id,
+                  so.source_path,
+                  so.llm_instruction,
+                  so.llm_content,
+                  so.output_json,
+                  d.author
+                FROM newsletter_run_sectionizer_outputs nrso
+                JOIN sectionizer_outputs so
+                  ON so.sectionizer_output_id = nrso.sectionizer_output_id
+                LEFT JOIN sectionizer_output_documents sod
+                  ON sod.sectionizer_output_id = so.sectionizer_output_id
+                LEFT JOIN documents d
+                  ON d.doc_id = sod.doc_id
+                WHERE nrso.newsletter_run_id = :newsletter_run_id
+                ORDER BY nrso.newsletter_run_sectionizer_output_id ASC
+                """
+            ),
+            {"newsletter_run_id": newsletter_run_id},
+        ).all()
 
         details_by_source_path: dict[str, dict[str, object]] = {}
         for row in sectionizer_rows:
             payload: dict[str, object] = {}
-            raw_payload = row["output_json"]
+            raw_payload = row.output_json
             if isinstance(raw_payload, str) and raw_payload.strip():
                 try:
                     loaded = json.loads(raw_payload)
@@ -668,43 +559,45 @@ def load_run_detail(newsletter_run_id: int) -> dict[str, object] | None:
                 except json.JSONDecodeError:
                     payload = {}
 
-            sectionizer_output_id = int(row["sectionizer_output_id"])
-            related_rows = connection.execute(
-                """
-                SELECT
-                  h.hoarder_output_id,
-                  h.source_id,
-                  h.source_path,
-                  h.created_at AS hoarder_created_at,
-                  sf.screened_file_id,
-                  sf.is_selected,
-                  sf.rejection_reason,
-                  sf.created_at AS screener_created_at,
-                  sf.processed_at AS screener_processed_at,
-                  d.doc_id,
-                  ma.media_id,
-                  ma.artifact_path,
-                  ma.mime_type
-                FROM sectionizer_output_documents sod
-                JOIN documents d
-                  ON d.doc_id = sod.doc_id
-                LEFT JOIN document_screened_files dsf
-                  ON dsf.doc_id = d.doc_id
-                LEFT JOIN screened_files sf
-                  ON sf.screened_file_id = dsf.screened_file_id
-                LEFT JOIN screened_file_hoarder_outputs sfho
-                  ON sfho.screened_file_id = sf.screened_file_id
-                LEFT JOIN hoarder_outputs h
-                  ON h.hoarder_output_id = sfho.hoarder_output_id
-                LEFT JOIN hoarder_output_media_assets homa
-                  ON homa.hoarder_output_id = h.hoarder_output_id
-                LEFT JOIN media_assets ma
-                  ON ma.media_id = homa.media_id
-                WHERE sod.sectionizer_output_id = ?
-                ORDER BY ma.media_id ASC
-                """,
-                (sectionizer_output_id,),
-            ).fetchall()
+            sectionizer_output_id = int(row.sectionizer_output_id)
+            related_rows = session.execute(
+                text(
+                    """
+                    SELECT
+                      h.hoarder_output_id,
+                      h.source_id,
+                      h.source_path,
+                      h.created_at AS hoarder_created_at,
+                      sf.screened_file_id,
+                      sf.is_selected,
+                      sf.rejection_reason,
+                      sf.created_at AS screener_created_at,
+                      sf.processed_at AS screener_processed_at,
+                      d.doc_id,
+                      ma.media_id,
+                      ma.artifact_path,
+                      ma.mime_type
+                    FROM sectionizer_output_documents sod
+                    JOIN documents d
+                      ON d.doc_id = sod.doc_id
+                    LEFT JOIN document_screened_files dsf
+                      ON dsf.doc_id = d.doc_id
+                    LEFT JOIN screened_files sf
+                      ON sf.screened_file_id = dsf.screened_file_id
+                    LEFT JOIN screened_file_hoarder_outputs sfho
+                      ON sfho.screened_file_id = sf.screened_file_id
+                    LEFT JOIN hoarder_outputs h
+                      ON h.hoarder_output_id = sfho.hoarder_output_id
+                    LEFT JOIN hoarder_output_media_assets homa
+                      ON homa.hoarder_output_id = h.hoarder_output_id
+                    LEFT JOIN media_assets ma
+                      ON ma.media_id = homa.media_id
+                    WHERE sod.sectionizer_output_id = :sectionizer_output_id
+                    ORDER BY ma.media_id ASC
+                    """
+                ),
+                {"sectionizer_output_id": sectionizer_output_id},
+            ).all()
 
             lineage_sources: list[dict[str, object]] = []
             images: list[dict[str, str]] = []
@@ -713,59 +606,59 @@ def load_run_detail(newsletter_run_id: int) -> dict[str, object] | None:
 
             for related in related_rows:
                 source_key = (
-                    related["hoarder_output_id"],
-                    related["screened_file_id"],
-                    related["doc_id"],
+                    related.hoarder_output_id,
+                    related.screened_file_id,
+                    related.doc_id,
                 )
                 if source_key not in seen_source_ids:
                     lineage_sources.append(
                         {
-                            "hoarder_output_id": related["hoarder_output_id"],
-                            "source_id": related["source_id"],
-                            "source_path": related["source_path"],
-                            "hoarder_created_at": related["hoarder_created_at"],
-                            "screened_file_id": related["screened_file_id"],
-                            "is_selected": related["is_selected"],
-                            "rejection_reason": related["rejection_reason"],
-                            "screener_created_at": related["screener_created_at"],
-                            "screener_processed_at": related["screener_processed_at"],
-                            "doc_id": related["doc_id"],
+                            "hoarder_output_id": related.hoarder_output_id,
+                            "source_id": related.source_id,
+                            "source_path": related.source_path,
+                            "hoarder_created_at": related.hoarder_created_at,
+                            "screened_file_id": related.screened_file_id,
+                            "is_selected": related.is_selected,
+                            "rejection_reason": related.rejection_reason,
+                            "screener_created_at": related.screener_created_at,
+                            "screener_processed_at": related.screener_processed_at,
+                            "doc_id": related.doc_id,
                         }
                     )
                     seen_source_ids.add(source_key)
 
-                media_id = related["media_id"]
+                media_id = related.media_id
                 if isinstance(media_id, int) and media_id not in seen_media_ids:
-                    artifact_path = str(related["artifact_path"] or "").strip()
-                    mime_type = str(related["mime_type"] or "").strip()
+                    artifact_path = str(related.artifact_path or "").strip()
+                    mime_type = str(related.mime_type or "").strip()
                     if artifact_path:
                         images.append({"artifact_path": artifact_path, "mime_type": mime_type})
                         seen_media_ids.add(media_id)
 
-            source_path = str(row["source_path"] or "")
+            source_path = str(row.source_path or "")
             details_by_source_path[source_path] = {
                 "sectionizer_output_id": sectionizer_output_id,
-                "doc_id": row["doc_id"],
+                "doc_id": row.doc_id,
                 "source_path": source_path,
-                "llm_instruction": str(row["llm_instruction"] or ""),
-                "llm_content": str(row["llm_content"] or ""),
+                "llm_instruction": str(row.llm_instruction or ""),
+                "llm_content": str(row.llm_content or ""),
                 "output": payload,
-                "author": str(row["author"] or ""),
+                "author": str(row.author or ""),
                 "lineage_sources": lineage_sources,
                 "images": images,
             }
 
         return {
-            "newsletter_run_id": int(run_row["newsletter_run_id"]),
-            "run_timestamp": str(run_row["run_timestamp"] or ""),
-            "created_at": str(run_row["created_at"] or ""),
-            "output_markdown": str(run_row["output_markdown"] or ""),
-            "output_html": str(run_row["output_html"] or ""),
+            "newsletter_run_id": int(run_row.newsletter_run_id),
+            "run_timestamp": str(run_row.run_timestamp or ""),
+            "created_at": str(run_row.created_at or ""),
+            "output_markdown": str(run_row.output_markdown or ""),
+            "output_html": str(run_row.output_html or ""),
             "output": output_payload,
             "config": _load_run_config(
-                connection,
-                int(run_row["newsletter_run_id"]),
-                str(run_row["run_timestamp"] or ""),
+                session,
+                int(run_row.newsletter_run_id),
+                str(run_row.run_timestamp or ""),
             ),
             "sectionizer_details": details_by_source_path,
         }
@@ -934,6 +827,34 @@ def render_pending_queue(
         st.success(empty_message)
         return
     st.dataframe(queue_items, use_container_width=True, hide_index=True)
+
+
+def render_screener_controls() -> None:
+    st.subheader("Run Screener")
+    backend = st.selectbox(
+        "Screener backend",
+        ["hosted", "ollama"],
+        index=0,
+        key="screener-tab-backend",
+    )
+    if st.button("Run screener", key="run-screener-tab", use_container_width=True):
+        with st.spinner(f"Running screener with backend={backend}..."):
+            result = subprocess.run(
+                [sys.executable, str(RUN_SCREENER_PATH), "--backend", backend],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+            )
+        st.cache_data.clear()
+        if result.returncode == 0:
+            st.success(f"Screener finished successfully with backend={backend}.")
+        else:
+            st.error(f"Screener failed with exit code {result.returncode}.")
+        if result.stdout.strip():
+            st.code(result.stdout[-12000:], language="text")
+        if result.stderr.strip():
+            st.code(result.stderr[-12000:], language="text")
+        st.rerun()
 
 
 def render_hoarder_sources_page() -> None:
@@ -1207,6 +1128,7 @@ def main() -> None:
         render_hoarder_sources_page()
 
     with screener_tab:
+        render_screener_controls()
         render_pending_queue(
             stage_name="Pending For Screener",
             queue_items=screener_pending,

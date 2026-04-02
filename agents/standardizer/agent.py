@@ -5,7 +5,6 @@ import json
 import logging
 import mimetypes
 import re
-import sqlite3
 import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -16,7 +15,16 @@ from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
+from sqlalchemy import select
 
+from db.standardizer_db import (
+    Document as StandardizedDocument,
+    DocumentScreenedFile,
+    HoarderOutputMediaAsset,
+    MediaAsset,
+    ScreenedFile,
+    session_scope,
+)
 from ..screener.storage import DB_PATH, ensure_screened_files_schema
 
 try:
@@ -98,63 +106,10 @@ def _ensure_storage() -> None:
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _ensure_schema(connection: sqlite3.Connection) -> None:
-    """Ensure the SQLite tables for standardizer and screener handoff exist."""
-    ensure_screened_files_schema(connection)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS documents (
-          doc_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          source_path TEXT NOT NULL,
-          author TEXT,
-          text_content TEXT,
-          metadata_json TEXT NOT NULL,
-          extraction_status TEXT NOT NULL,
-          extraction_error TEXT,
-          content_sha256 TEXT,
-          modified_at TEXT,
-          created_at TEXT,
-          persisted_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS media_assets (
-          media_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          doc_id INTEGER NOT NULL,
-          artifact_path TEXT NOT NULL,
-          mime_type TEXT,
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(doc_id) REFERENCES documents(doc_id)
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS document_screened_files (
-          document_screened_file_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          doc_id INTEGER NOT NULL,
-          screened_file_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(doc_id) REFERENCES documents(doc_id),
-          FOREIGN KEY(screened_file_id) REFERENCES screened_files(screened_file_id)
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS hoarder_output_media_assets (
-          hoarder_output_media_asset_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          hoarder_output_id INTEGER NOT NULL,
-          media_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(hoarder_output_id) REFERENCES hoarder_outputs(hoarder_output_id),
-          FOREIGN KEY(media_id) REFERENCES media_assets(media_id)
-        )
-        """
-    )
-    connection.commit()
+def _ensure_schema(connection: object | None = None) -> None:
+    """Ensure the shared standardizer-stage tables exist."""
+    del connection
+    ensure_screened_files_schema(None)
 
 
 def _to_iso_or_none(value: Any) -> str | None:
@@ -189,28 +144,15 @@ def _load_screened_rows_from_db() -> list[dict[str, Any]]:
         return []
 
     try:
-        with sqlite3.connect(DB_PATH) as connection:
-            ensure_screened_files_schema(connection)
-            cursor = connection.execute(
-                """
-                SELECT
-                  screened_file_id,
-                  source_payload_json,
-                  source_path,
-                  name,
-                  source_created_at,
-                  source_modified_at,
-                  created_at,
-                  processed_at
-                FROM screened_files
-                WHERE is_selected = 1
-                  AND processed_at IS NULL
-                ORDER BY screened_file_id ASC
-                """
-            )
+        with session_scope() as session:
+            records = session.execute(
+                select(ScreenedFile)
+                .where(ScreenedFile.is_selected == 1, ScreenedFile.processed_at.is_(None))
+                .order_by(ScreenedFile.screened_file_id.asc())
+            ).scalars().all()
             rows: list[dict[str, Any]] = []
-            for record in cursor.fetchall():
-                payload_raw = record[1]
+            for record in records:
+                payload_raw = record.source_payload_json
                 item: dict[str, Any] = {}
                 if isinstance(payload_raw, str) and payload_raw.strip():
                     try:
@@ -218,20 +160,20 @@ def _load_screened_rows_from_db() -> list[dict[str, Any]]:
                         if isinstance(loaded, dict):
                             item = loaded
                     except json.JSONDecodeError:
-                        logger.debug("Ignoring invalid screener row payload for screened_file_id=%s", record[0])
+                        logger.debug("Ignoring invalid screener row payload for screened_file_id=%s", record.screened_file_id)
 
                 if not item:
                     item = {
-                        "path": record[2],
-                        "name": record[3],
-                        "createdAt": record[4],
-                        "modifiedAt": record[5],
+                        "path": record.source_path,
+                        "name": record.name,
+                        "createdAt": record.source_created_at,
+                        "modifiedAt": record.source_modified_at,
                         "isSelected": True,
                     }
 
-                item["_screened_file_id"] = int(record[0])
-                item["_screened_created_at"] = record[6]
-                item["_screened_processed_at"] = record[7]
+                item["_screened_file_id"] = int(record.screened_file_id)
+                item["_screened_created_at"] = record.created_at
+                item["_screened_processed_at"] = record.processed_at
                 rows.append(item)
 
             logger.debug("Loaded %d selected unprocessed screener rows from %s", len(rows), DB_PATH)
@@ -281,17 +223,12 @@ def _load_screened_payload(ctx: InvocationContext) -> tuple[list[dict[str, Any]]
     return [], "sqlite.screened_files"
 
 
-def _mark_screened_row_processed(connection: sqlite3.Connection, screened_file_id: int) -> str:
+def _mark_screened_row_processed(session: Any, screened_file_id: int) -> str:
     """Stamp the shared screener row after standardizer handles it."""
     processed_at = _utc_now_iso()
-    connection.execute(
-        """
-        UPDATE screened_files
-        SET processed_at = ?
-        WHERE screened_file_id = ?
-        """,
-        (processed_at, screened_file_id),
-    )
+    row = session.get(ScreenedFile, screened_file_id)
+    if row is not None:
+        row.processed_at = processed_at
     return processed_at
 
 
@@ -756,11 +693,11 @@ class DocumentStandardizerAgent(BaseAgent):
         )
         standardized_documents: list[dict[str, Any]] = []
 
-        with sqlite3.connect(DB_PATH) as connection:
-            _ensure_schema(connection)
+        with session_scope() as session:
+            _ensure_schema()
 
             for screened_file_id in duplicate_screened_file_ids:
-                processed_at = _mark_screened_row_processed(connection, screened_file_id)
+                processed_at = _mark_screened_row_processed(session, screened_file_id)
                 logger.debug(
                     "Marked duplicate screened_file_id=%s processed at %s without standardization",
                     screened_file_id,
@@ -819,42 +756,35 @@ class DocumentStandardizerAgent(BaseAgent):
                 screened_file_id = item.get("_screened_file_id")
                 hoarder_output_id = item.get("_hoarder_output_id")
 
-                cursor = connection.execute(
-                    """
-                    INSERT INTO documents (
-                      source_path, author, text_content, metadata_json,
-                      extraction_status, extraction_error, content_sha256,
-                      modified_at, created_at, persisted_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        resolved_path_str,
-                        author,
-                        text_content,
-                        _safe_json(metadata),
-                        status,
-                        extraction_error,
-                        content_sha256,
-                        item.get("modifiedAt"),
-                        item.get("createdAt"),
-                        persisted_at,
-                    ),
+                document_row = StandardizedDocument(
+                    source_path=resolved_path_str,
+                    author=author,
+                    text_content=text_content,
+                    metadata_json=_safe_json(metadata),
+                    extraction_status=status,
+                    extraction_error=extraction_error,
+                    content_sha256=content_sha256,
+                    modified_at=item.get("modifiedAt"),
+                    created_at=item.get("createdAt"),
+                    persisted_at=persisted_at,
                 )
-                doc_id = int(cursor.lastrowid)
+                session.add(document_row)
+                session.flush()
+                doc_id = int(document_row.doc_id)
                 logger.debug("Inserted document row doc_id=%s source_path=%s", doc_id, resolved_path_str)
 
                 if isinstance(screened_file_id, int):
-                    connection.execute(
-                        """
-                        INSERT INTO document_screened_files (doc_id, screened_file_id, created_at)
-                        VALUES (?, ?, ?)
-                        """,
-                        (doc_id, screened_file_id, persisted_at),
+                    session.add(
+                        DocumentScreenedFile(
+                            doc_id=doc_id,
+                            screened_file_id=screened_file_id,
+                            created_at=persisted_at,
+                        )
                     )
 
                 processed_at = None
                 if isinstance(screened_file_id, int):
-                    processed_at = _mark_screened_row_processed(connection, screened_file_id)
+                    processed_at = _mark_screened_row_processed(session, screened_file_id)
                     logger.debug(
                         "Marked screened_file_id=%s processed at %s",
                         screened_file_id,
@@ -868,21 +798,22 @@ class DocumentStandardizerAgent(BaseAgent):
                         continue
                     mime_type = str(media_ref.get("mime_type") or _guess_mime(artifact_path))
 
-                    connection.execute(
-                        """
-                        INSERT INTO media_assets (doc_id, artifact_path, mime_type, created_at)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (doc_id, artifact_path, mime_type, persisted_at),
+                    media_row = MediaAsset(
+                        doc_id=doc_id,
+                        artifact_path=artifact_path,
+                        mime_type=mime_type,
+                        created_at=persisted_at,
                     )
-                    media_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+                    session.add(media_row)
+                    session.flush()
+                    media_id = int(media_row.media_id)
                     if isinstance(hoarder_output_id, int):
-                        connection.execute(
-                            """
-                            INSERT INTO hoarder_output_media_assets (hoarder_output_id, media_id, created_at)
-                            VALUES (?, ?, ?)
-                            """,
-                            (hoarder_output_id, media_id, persisted_at),
+                        session.add(
+                            HoarderOutputMediaAsset(
+                                hoarder_output_id=hoarder_output_id,
+                                media_id=media_id,
+                                created_at=persisted_at,
+                            )
                         )
                     persisted_media.append({"artifact_path": artifact_path, "mime_type": mime_type})
                 logger.debug("Persisted %d media rows for doc_id=%s", len(persisted_media), doc_id)
@@ -904,7 +835,6 @@ class DocumentStandardizerAgent(BaseAgent):
                     }
                 )
 
-            connection.commit()
             logger.debug("Committed %d standardized documents to %s", len(standardized_documents), DB_PATH)
 
         standardizer_payload = {

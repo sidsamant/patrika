@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from google.adk.agents import BaseAgent
 
 from ..config import SourceConfig
+logger = logging.getLogger(__name__)
 
 
 class NotImplementedSourceAgent(BaseAgent):
@@ -54,6 +56,9 @@ def parse_state_json_list(value: Any) -> list[dict[str, object]]:
 def merge_file_list(existing: Any, new_items: list[dict[str, object]]) -> list[dict[str, object]]:
     # Keep source agents append-only so multiple enabled sources can
     # contribute items during the same hoarder run.
+    logger.debug("existing=%d", existing)
     merged = parse_state_json_list(existing)
+    logger.debug("existing count=%d", len(merged))
+    logger.debug("new_items count=%d", len(new_items))
     merged.extend(new_items)
     return merged

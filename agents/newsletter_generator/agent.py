@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -13,6 +12,15 @@ from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
+from sqlalchemy import select, text
+
+from db.standardizer_db import (
+    MediaAsset,
+    NewsletterRun,
+    NewsletterRunSectionizerOutput,
+    ensure_standardizer_schema,
+    session_scope,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = PROJECT_ROOT / ".output"
@@ -32,49 +40,10 @@ def _utc_now_iso() -> str:
     return _utc_now().isoformat()
 
 
-def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
-    """Add a missing SQLite column when upgrading an existing table."""
-    existing_columns = {
-        str(row[1])
-        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-        if len(row) > 1
-    }
-    if column_name not in existing_columns:
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
-
-
-def _ensure_newsletter_schema(connection: sqlite3.Connection) -> None:
+def _ensure_newsletter_schema(connection: object | None = None) -> None:
     """Ensure newsletter run tables exist in the shared SQLite database."""
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS newsletter_runs (
-          newsletter_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          run_timestamp TEXT NOT NULL,
-          llm_instruction TEXT,
-          llm_content TEXT,
-          output_markdown TEXT NOT NULL,
-          output_html TEXT,
-          output_json TEXT NOT NULL,
-          created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS newsletter_run_sectionizer_outputs (
-          newsletter_run_sectionizer_output_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          newsletter_run_id INTEGER NOT NULL,
-          sectionizer_output_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(newsletter_run_id) REFERENCES newsletter_runs(newsletter_run_id),
-          FOREIGN KEY(sectionizer_output_id) REFERENCES sectionizer_outputs(sectionizer_output_id)
-        )
-        """
-    )
-    _ensure_column(connection, "newsletter_runs", "llm_instruction", "TEXT")
-    _ensure_column(connection, "newsletter_runs", "llm_content", "TEXT")
-    _ensure_column(connection, "newsletter_runs", "output_html", "TEXT")
-    connection.commit()
+    del connection
+    ensure_standardizer_schema()
 
 
 def _load_sectionizer_outputs() -> tuple[str | None, list[dict[str, Any]]]:
@@ -82,45 +51,47 @@ def _load_sectionizer_outputs() -> tuple[str | None, list[dict[str, Any]]]:
     if not STANDARDIZER_DB_PATH.exists():
         return None, []
 
-    with sqlite3.connect(STANDARDIZER_DB_PATH) as connection:
-        _ensure_newsletter_schema(connection)
-        cursor = connection.execute(
-            """
-            WITH ranked_sectionizer_outputs AS (
-              SELECT
-                so.sectionizer_output_id,
-                so.doc_id,
-                so.source_path,
-                so.output_json,
-                so.run_timestamp,
-                so.created_at,
-                ROW_NUMBER() OVER (
-                  PARTITION BY COALESCE(NULLIF(LOWER(TRIM(so.source_path)), ''), 'doc:' || CAST(so.doc_id AS TEXT))
-                  ORDER BY so.sectionizer_output_id DESC
-                ) AS source_rank
-              FROM sectionizer_outputs so
-              WHERE COALESCE(so.match_count, 0) > 0
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM newsletter_run_sectionizer_outputs nrso
-                  WHERE nrso.sectionizer_output_id = so.sectionizer_output_id
+    with session_scope() as session:
+        _ensure_newsletter_schema()
+        records = session.execute(
+            text(
+                """
+                WITH ranked_sectionizer_outputs AS (
+                  SELECT
+                    so.sectionizer_output_id,
+                    so.doc_id,
+                    so.source_path,
+                    so.output_json,
+                    so.run_timestamp,
+                    so.created_at,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY COALESCE(NULLIF(LOWER(TRIM(so.source_path)), ''), 'doc:' || CAST(so.doc_id AS TEXT))
+                      ORDER BY so.sectionizer_output_id DESC
+                    ) AS source_rank
+                  FROM sectionizer_outputs so
+                  WHERE COALESCE(so.match_count, 0) > 0
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM newsletter_run_sectionizer_outputs nrso
+                      WHERE nrso.sectionizer_output_id = so.sectionizer_output_id
+                    )
                 )
+                SELECT
+                  sectionizer_output_id,
+                  doc_id,
+                  source_path,
+                  output_json,
+                  run_timestamp,
+                  created_at
+                FROM ranked_sectionizer_outputs
+                WHERE source_rank = 1
+                ORDER BY sectionizer_output_id ASC
+                """
             )
-            SELECT
-              sectionizer_output_id,
-              doc_id,
-              source_path,
-              output_json,
-              run_timestamp,
-              created_at
-            FROM ranked_sectionizer_outputs
-            WHERE source_rank = 1
-            ORDER BY sectionizer_output_id ASC
-            """
-        )
+        ).all()
 
         rows: list[dict[str, Any]] = []
-        for record in cursor.fetchall():
+        for record in records:
             payload_raw = record[3]
             payload: dict[str, Any] = {}
             if isinstance(payload_raw, str) and payload_raw.strip():
@@ -149,23 +120,17 @@ def _load_media_assets() -> dict[int, list[dict[str, str]]]:
         return {}
 
     results: dict[int, list[dict[str, str]]] = defaultdict(list)
-    with sqlite3.connect(STANDARDIZER_DB_PATH) as connection:
-        cursor = connection.execute(
-            """
-            SELECT doc_id, artifact_path, mime_type
-            FROM media_assets
-            ORDER BY media_id ASC
-            """
-        )
-        for doc_id, artifact_path, mime_type in cursor.fetchall():
+    with session_scope() as session:
+        rows = session.execute(select(MediaAsset).order_by(MediaAsset.media_id.asc())).scalars().all()
+        for row in rows:
             try:
-                normalized_doc_id = int(doc_id)
+                normalized_doc_id = int(row.doc_id)
             except (TypeError, ValueError):
                 continue
             results[normalized_doc_id].append(
                 {
-                    "artifact_path": str(artifact_path or "").strip(),
-                    "mime_type": str(mime_type or "").strip(),
+                    "artifact_path": str(row.artifact_path or "").strip(),
+                    "mime_type": str(row.mime_type or "").strip(),
                 }
             )
     return results
@@ -316,7 +281,7 @@ def _build_newsletter_content(sectionizer_outputs: list[dict[str, Any]]) -> str:
 
 def _persist_newsletter_run(
     *,
-    connection: sqlite3.Connection,
+    session: Any,
     run_timestamp: str,
     llm_instruction: str,
     llm_content: str,
@@ -326,45 +291,29 @@ def _persist_newsletter_run(
     sectionizer_output_ids: list[int],
 ) -> int:
     """Insert one newsletter run row and the referenced sectionizer-output links."""
-    _ensure_newsletter_schema(connection)
+    _ensure_newsletter_schema()
     created_at = _utc_now_iso()
-    cursor = connection.execute(
-        """
-        INSERT INTO newsletter_runs (
-          run_timestamp,
-          llm_instruction,
-          llm_content,
-          output_markdown,
-          output_html,
-          output_json,
-          created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            run_timestamp,
-            llm_instruction,
-            llm_content,
-            newsletter_markdown,
-            newsletter_html,
-            json.dumps(output_payload, ensure_ascii=True, default=str),
-            created_at,
-        ),
+    row = NewsletterRun(
+        run_timestamp=run_timestamp,
+        llm_instruction=llm_instruction,
+        llm_content=llm_content,
+        output_markdown=newsletter_markdown,
+        output_html=newsletter_html,
+        output_json=json.dumps(output_payload, ensure_ascii=True, default=str),
+        created_at=created_at,
     )
-    newsletter_run_id = int(cursor.lastrowid)
+    session.add(row)
+    session.flush()
+    newsletter_run_id = int(row.newsletter_run_id)
 
     for sectionizer_output_id in sectionizer_output_ids:
-        connection.execute(
-            """
-            INSERT INTO newsletter_run_sectionizer_outputs (
-              newsletter_run_id,
-              sectionizer_output_id,
-              created_at
-            ) VALUES (?, ?, ?)
-            """,
-            (newsletter_run_id, sectionizer_output_id, created_at),
+        session.add(
+            NewsletterRunSectionizerOutput(
+                newsletter_run_id=newsletter_run_id,
+                sectionizer_output_id=sectionizer_output_id,
+                created_at=created_at,
+            )
         )
-
-    connection.commit()
     return newsletter_run_id
 
 
@@ -453,9 +402,9 @@ class NewsletterGeneratorAgent(BaseAgent):
         }
 
         newsletter_run_id = None
-        with sqlite3.connect(STANDARDIZER_DB_PATH) as connection:
+        with session_scope() as session:
             newsletter_run_id = _persist_newsletter_run(
-                connection=connection,
+                session=session,
                 run_timestamp=run_timestamp,
                 llm_instruction=llm_instruction,
                 llm_content=llm_content,

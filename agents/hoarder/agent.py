@@ -15,7 +15,9 @@ from .sources.filesource.agent import create_filesource_hoarder_agent
 from .sources.gdocs.agent import create_gdocs_hoarder_agent
 from .sources.sharepoint.agent import create_sharepoint_hoarder_agent
 from .sources.slack.agent import create_slack_hoarder_agent
+from .sources.twitter.agent import create_twitter_hoarder_agent
 from .sources.whatsapp.agent import create_whatsapp_hoarder_agent
+from .sources.websource.agent import create_websource_hoarder_agent
 from .storage import DB_PATH, persist_hoarder_payload
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -63,7 +65,9 @@ def build_hoarder_source_agent(source: SourceConfig):
         "gdocs": create_gdocs_hoarder_agent,
         "sharepoint": create_sharepoint_hoarder_agent,
         "slack": create_slack_hoarder_agent,
+        "twitter": create_twitter_hoarder_agent,
         "whatsapp": create_whatsapp_hoarder_agent,
+        "websource": create_websource_hoarder_agent,
     }
     builder = builders.get(source.id)
     if not builder:

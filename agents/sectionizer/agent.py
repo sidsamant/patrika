@@ -6,7 +6,6 @@ from functools import lru_cache
 import json
 import logging
 import os
-import sqlite3
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -15,10 +14,17 @@ from dotenv import load_dotenv
 from google.adk.agents import BaseAgent, LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
-from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.events import Event
 from google.adk.models import LlmRequest, LlmResponse
 from google.genai import types
+from sqlalchemy import text
+
+from db.standardizer_db import (
+    SectionizerOutput,
+    SectionizerOutputDocument,
+    ensure_standardizer_schema,
+    session_scope,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -154,64 +160,20 @@ def _utc_now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
-def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
-    """Add a missing SQLite column when upgrading an existing table."""
-    existing_columns = {
-        str(row[1])
-        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-        if len(row) > 1
-    }
-    if column_name not in existing_columns:
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
-
-
-def _ensure_sectionizer_schema(connection: sqlite3.Connection) -> None:
-    """Ensure the sectionizer run history table exists in the standardizer DB."""
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sectionizer_outputs (
-          sectionizer_output_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          doc_id INTEGER NOT NULL,
-          output_path TEXT NOT NULL,
-          source_path TEXT,
-          llm_instruction TEXT,
-          llm_content TEXT,
-          output_json TEXT,
-          match_count INTEGER,
-          run_timestamp TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(doc_id) REFERENCES documents(doc_id)
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sectionizer_output_documents (
-          sectionizer_output_document_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          sectionizer_output_id INTEGER NOT NULL,
-          doc_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(sectionizer_output_id) REFERENCES sectionizer_outputs(sectionizer_output_id),
-          FOREIGN KEY(doc_id) REFERENCES documents(doc_id)
-        )
-        """
-    )
-    _ensure_column(connection, "sectionizer_outputs", "source_path", "TEXT")
-    _ensure_column(connection, "sectionizer_outputs", "llm_instruction", "TEXT")
-    _ensure_column(connection, "sectionizer_outputs", "llm_content", "TEXT")
-    _ensure_column(connection, "sectionizer_outputs", "output_json", "TEXT")
-    _ensure_column(connection, "sectionizer_outputs", "match_count", "INTEGER")
-    connection.commit()
+def _ensure_sectionizer_schema(connection: object | None = None) -> None:
+    """Ensure the sectionizer run history tables exist in the standardizer DB."""
+    del connection
+    ensure_standardizer_schema()
 
 
 def _persist_row_output(
     *,
-    connection: sqlite3.Connection,
+    session: Any,
     row: dict[str, Any],
     row_output_payload: dict[str, Any],
 ) -> dict[str, Any]:
     """Insert one sectionizer output row into SQLite without replacing prior runs."""
-    _ensure_sectionizer_schema(connection)
+    _ensure_sectionizer_schema()
 
     created_at = _utc_now_iso()
     run_timestamp = RUN_TIMESTAMP
@@ -219,42 +181,27 @@ def _persist_row_output(
     match_count = len(row_output_payload.get("matches") or []) if isinstance(row_output_payload.get("matches"), list) else 0
     llm_instruction = str(row_output_payload.get("llm_instruction") or "").strip() or None
     llm_content = str(row_output_payload.get("llm_content") or "").strip() or None
-    cursor = connection.execute(
-        """
-        INSERT INTO sectionizer_outputs (
-          doc_id,
-          output_path,
-          source_path,
-          llm_instruction,
-          llm_content,
-          output_json,
-          match_count,
-          run_timestamp,
-          created_at
+    record = SectionizerOutput(
+        doc_id=row.get("doc_id"),
+        output_path="",
+        source_path=source_path,
+        llm_instruction=llm_instruction,
+        llm_content=llm_content,
+        output_json=json.dumps(row_output_payload, ensure_ascii=True, default=str),
+        match_count=match_count,
+        run_timestamp=run_timestamp,
+        created_at=created_at,
+    )
+    session.add(record)
+    session.flush()
+    sectionizer_output_id = int(record.sectionizer_output_id)
+    session.add(
+        SectionizerOutputDocument(
+            sectionizer_output_id=sectionizer_output_id,
+            doc_id=row.get("doc_id"),
+            created_at=created_at,
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            row.get("doc_id"),
-            "",
-            source_path,
-            llm_instruction,
-            llm_content,
-            json.dumps(row_output_payload, ensure_ascii=True, default=str),
-            match_count,
-            run_timestamp,
-            created_at,
-        ),
     )
-    sectionizer_output_id = int(cursor.lastrowid)
-    connection.execute(
-        """
-        INSERT INTO sectionizer_output_documents (sectionizer_output_id, doc_id, created_at)
-        VALUES (?, ?, ?)
-        """,
-        (sectionizer_output_id, row.get("doc_id"), created_at),
-    )
-    connection.commit()
 
     return {
         "sectionizer_output_id": sectionizer_output_id,
@@ -302,54 +249,56 @@ def _load_rows_from_db() -> list[dict[str, Any]]:
         logger.debug("Standardizer database not found at %s", STANDARDIZER_DB_PATH)
         return []
     try:
-        with sqlite3.connect(STANDARDIZER_DB_PATH) as connection:
-            cursor = connection.execute(
-                """
-                WITH ranked_documents AS (
-                  SELECT
-                    d.doc_id,
-                    d.source_path,
-                    d.author,
-                    d.text_content,
-                    d.metadata_json,
-                    d.extraction_status,
-                    d.extraction_error,
-                    d.content_sha256,
-                    d.modified_at,
-                    d.created_at,
-                    d.persisted_at,
-                    ROW_NUMBER() OVER (
-                      PARTITION BY COALESCE(NULLIF(LOWER(TRIM(d.source_path)), ''), 'doc:' || CAST(d.doc_id AS TEXT))
-                      ORDER BY d.doc_id DESC
-                    ) AS source_rank
-                  FROM documents d
-                  WHERE d.text_content IS NOT NULL
-                    AND TRIM(d.text_content) <> ''
-                    AND NOT EXISTS (
-                      SELECT 1
-                      FROM sectionizer_outputs so
-                      WHERE so.doc_id = d.doc_id
+        with session_scope() as session:
+            records = session.execute(
+                text(
+                    """
+                    WITH ranked_documents AS (
+                      SELECT
+                        d.doc_id,
+                        d.source_path,
+                        d.author,
+                        d.text_content,
+                        d.metadata_json,
+                        d.extraction_status,
+                        d.extraction_error,
+                        d.content_sha256,
+                        d.modified_at,
+                        d.created_at,
+                        d.persisted_at,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY COALESCE(NULLIF(LOWER(TRIM(d.source_path)), ''), 'doc:' || CAST(d.doc_id AS TEXT))
+                          ORDER BY d.doc_id DESC
+                        ) AS source_rank
+                      FROM documents d
+                      WHERE d.text_content IS NOT NULL
+                        AND TRIM(d.text_content) <> ''
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM sectionizer_outputs so
+                          WHERE so.doc_id = d.doc_id
+                        )
                     )
+                    SELECT
+                      doc_id,
+                      source_path,
+                      author,
+                      text_content,
+                      metadata_json,
+                      extraction_status,
+                      extraction_error,
+                      content_sha256,
+                      modified_at,
+                      created_at,
+                      persisted_at
+                    FROM ranked_documents
+                    WHERE source_rank = 1
+                    ORDER BY doc_id ASC
+                    """
                 )
-                SELECT
-                  doc_id,
-                  source_path,
-                  author,
-                  text_content,
-                  metadata_json,
-                  extraction_status,
-                  extraction_error,
-                  content_sha256,
-                  modified_at,
-                  created_at,
-                  persisted_at
-                FROM ranked_documents
-                WHERE source_rank = 1
-                ORDER BY doc_id ASC
-                """
-            )
+            ).all()
             rows: list[dict[str, Any]] = []
-            for record in cursor.fetchall():
+            for record in records:
                 metadata_raw = record[4]
                 metadata: dict[str, Any] = {}
                 if isinstance(metadata_raw, str) and metadata_raw.strip():
@@ -718,8 +667,8 @@ class SectionizerAgent(BaseAgent):
         logger.debug("Sectionizer row source: %s (%d rows)", row_source, len(standardized_rows))
 
         persisted_outputs: list[dict[str, Any]] = []
-        with sqlite3.connect(STANDARDIZER_DB_PATH) as connection:
-            _ensure_sectionizer_schema(connection)
+        with session_scope() as session:
+            _ensure_sectionizer_schema()
 
             for row_index, row in enumerate(standardized_rows):
                 if row_index > 0 and LLM_REQUEST_DELAY_SECONDS > 0:
@@ -760,7 +709,7 @@ class SectionizerAgent(BaseAgent):
                     "matches": matches,
                 }
                 persisted_record = _persist_row_output(
-                    connection=connection,
+                    session=session,
                     row=row,
                     row_output_payload=row_output_payload,
                 )
