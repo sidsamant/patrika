@@ -12,8 +12,6 @@ The main content lineage through the shared DB is:
 
 The relation tables between those stages are:
 
-- `screened_file_hoarder_outputs`
-  Maps screener rows back to hoarder rows.
 - `document_screened_files`
   Maps standardized documents back to screener rows.
 - `sectionizer_output_documents`
@@ -56,7 +54,7 @@ Media and editorial side tables attached to that flow are:
   - `agents/hoarder/agent.py`
     - persists hoarder results through `persist_hoarder_payload()`
   - `agents/screener/storage.py`
-    - foreign-key style linkage via `screened_file_hoarder_outputs`
+    - linked directly from `screened_files.hoarder_output_id`
   - `agents/standardizer/agent.py`
     - used indirectly by `hoarder_output_media_assets`
   - `run_observability_dashboard.py`
@@ -134,18 +132,12 @@ Media and editorial side tables attached to that flow are:
     - newsletter lineage joins
 
 ### `screened_file_hoarder_outputs`
-- Purpose:
-  Relation table linking screener rows back to the hoarder rows they came from.
-- Key columns:
-  - `screened_file_id`
-  - `hoarder_output_id`
-  - `created_at`
-- Used in code:
-  - `agents/screener/storage.py`
-    - schema creation in `ensure_screened_files_schema()`
-    - inserts in `persist_screened_payload()`
-  - `run_observability_dashboard.py`
-    - lineage joins from newsletter stories back to hoarder items
+- Status:
+  Legacy table that is no longer required by the current pipeline.
+- Why it is redundant:
+  `screened_files.hoarder_output_id` already links each screener row back to its hoarder row.
+- Current code usage:
+  None. New code should not read from or write to this table.
 
 ## Standardizer
 

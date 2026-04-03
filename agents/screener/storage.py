@@ -7,7 +7,6 @@ from typing import Any
 from db.standardizer_db import (
     DB_PATH,
     ScreenedFile,
-    ScreenedFileHoarderOutput,
     ensure_standardizer_schema,
     session_scope,
     utc_now_iso,
@@ -84,16 +83,5 @@ def persist_screened_payload(raw_value: Any) -> int:
                 processed_at=None,
             )
             session.add(screened_row)
-            session.flush()
-
-            hoarder_output_id = item.get("_hoarder_output_id") if isinstance(item.get("_hoarder_output_id"), int) else None
-            if hoarder_output_id is not None:
-                session.add(
-                    ScreenedFileHoarderOutput(
-                        screened_file_id=int(screened_row.screened_file_id),
-                        hoarder_output_id=hoarder_output_id,
-                        created_at=created_at,
-                    )
-                )
 
     return len(items)

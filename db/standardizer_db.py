@@ -78,15 +78,6 @@ class ScreenedFile(Base):
     hoarder_output_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
-class ScreenedFileHoarderOutput(Base):
-    __tablename__ = "screened_file_hoarder_outputs"
-
-    screened_file_hoarder_output_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    screened_file_id: Mapped[int] = mapped_column(Integer, ForeignKey("screened_files.screened_file_id"), nullable=False)
-    hoarder_output_id: Mapped[int] = mapped_column(Integer, ForeignKey("hoarder_outputs.hoarder_output_id"), nullable=False)
-    created_at: Mapped[str] = mapped_column(Text, nullable=False)
-
-
 class Document(Base):
     __tablename__ = "documents"
 
@@ -188,7 +179,13 @@ class NewsletterRunConfig(Base):
 
 
 engine = create_engine(DATABASE_URL, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+    expire_on_commit=False,
+    future=True,
+)
 
 
 def _ensure_column(table_name: str, column_name: str, column_sql: str) -> None:

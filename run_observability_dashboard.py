@@ -7,6 +7,7 @@ from datetime import date, datetime
 from html import escape
 from pathlib import Path
 import sys
+from urllib.parse import urlparse
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -29,6 +30,9 @@ DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 RUN_PIPELINE_PATH = PROJECT_ROOT / "run_pipeline.py"
 RUN_HOARDER_SOURCE_PATH = PROJECT_ROOT / "run_hoarder_source.py"
 RUN_SCREENER_PATH = PROJECT_ROOT / "run_screener.py"
+RUN_STANDARDIZER_PATH = PROJECT_ROOT / "run_standardizer.py"
+RUN_SECTIONIZER_PATH = PROJECT_ROOT / "run_sectionizer.py"
+RUN_NEWSLETTER_GENERATOR_PATH = PROJECT_ROOT / "run_newsletter_generator.py"
 HOARDER_CONFIG_PATH = PROJECT_ROOT / "agents" / "hoarder" / "config.yaml"
 
 
@@ -448,6 +452,53 @@ def load_pending_sectionizer_items(_db_token: str) -> list[dict[str, object]]:
     return [dict(row._mapping) for row in rows]
 
 
+@st.cache_data(show_spinner=False)
+def load_pending_newsletter_generation_items(_db_token: str) -> list[dict[str, object]]:
+    del _db_token
+    if not DB_PATH.exists():
+        return []
+
+    _ensure_dashboard_schema()
+    with session_scope() as session:
+        rows = session.execute(
+            text(
+                """
+                WITH ranked_sectionizer_outputs AS (
+                  SELECT
+                    so.sectionizer_output_id,
+                    so.doc_id,
+                    so.source_path,
+                    so.match_count,
+                    so.run_timestamp,
+                    so.created_at,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY COALESCE(NULLIF(LOWER(TRIM(so.source_path)), ''), 'doc:' || CAST(so.doc_id AS TEXT))
+                      ORDER BY so.sectionizer_output_id DESC
+                    ) AS source_rank
+                  FROM sectionizer_outputs so
+                  WHERE COALESCE(so.match_count, 0) > 0
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM newsletter_run_sectionizer_outputs nrso
+                      WHERE nrso.sectionizer_output_id = so.sectionizer_output_id
+                    )
+                )
+                SELECT
+                  sectionizer_output_id,
+                  doc_id,
+                  source_path,
+                  match_count,
+                  run_timestamp,
+                  created_at
+                FROM ranked_sectionizer_outputs
+                WHERE source_rank = 1
+                ORDER BY sectionizer_output_id ASC
+                """
+            )
+        ).all()
+    return [dict(row._mapping) for row in rows]
+
+
 def _parse_default_newsletter_date(raw_value: str) -> date:
     value = str(raw_value or "").strip()
     if not value:
@@ -598,10 +649,8 @@ def load_run_detail(newsletter_run_id: int, _db_token: str) -> dict[str, object]
                       ON dsf.doc_id = d.doc_id
                     LEFT JOIN screened_files sf
                       ON sf.screened_file_id = dsf.screened_file_id
-                    LEFT JOIN screened_file_hoarder_outputs sfho
-                      ON sfho.screened_file_id = sf.screened_file_id
                     LEFT JOIN hoarder_outputs h
-                      ON h.hoarder_output_id = sfho.hoarder_output_id
+                      ON h.hoarder_output_id = sf.hoarder_output_id
                     LEFT JOIN hoarder_output_media_assets homa
                       ON homa.hoarder_output_id = h.hoarder_output_id
                     LEFT JOIN media_assets ma
@@ -687,6 +736,19 @@ def _configured_newsletter_date(detail: dict[str, object]) -> str:
     return _default_run_config(str(detail.get("run_timestamp") or "")).get("newsletter_date", "")
 
 
+def _html_image_src(raw_path: str) -> str:
+    value = str(raw_path or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https", "file", "data"}:
+        return value
+    image_path = Path(value)
+    if not image_path.is_absolute():
+        image_path = (PROJECT_ROOT / image_path).resolve()
+    return image_path.as_uri()
+
+
 def _newsletter_html_bytes(detail: dict[str, object]) -> bytes:
     output = detail.get("output")
     sections = output.get("sections") if isinstance(output, dict) else {}
@@ -744,8 +806,9 @@ def _newsletter_html_bytes(detail: dict[str, object]) -> bytes:
                     parts.append("<article class=\"story\">")
                     parts.append(f"<h3>{title}</h3>")
                     if image_path:
+                        image_src = _html_image_src(image_path)
                         parts.append("<figure class=\"image\">")
-                        parts.append(f"<img src=\"{escape(Path(image_path).as_uri())}\" alt=\"{title}\">")
+                        parts.append(f"<img src=\"{escape(image_src)}\" alt=\"{title}\">")
                         if image_caption:
                             parts.append(f"<figcaption>{image_caption}</figcaption>")
                         parts.append("</figure>")
@@ -864,6 +927,72 @@ def render_screener_controls() -> None:
             st.success(f"Screener finished successfully with backend={backend}.")
         else:
             st.error(f"Screener failed with exit code {result.returncode}.")
+        if result.stdout.strip():
+            st.code(result.stdout[-12000:], language="text")
+        if result.stderr.strip():
+            st.code(result.stderr[-12000:], language="text")
+        st.rerun()
+
+
+def render_standardizer_controls() -> None:
+    st.subheader("Run Standardizer")
+    if st.button("Run standardizer", key="run-standardizer-tab", use_container_width=True):
+        with st.spinner("Running standardizer..."):
+            result = subprocess.run(
+                [sys.executable, str(RUN_STANDARDIZER_PATH)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+            )
+        st.cache_data.clear()
+        if result.returncode == 0:
+            st.success("Standardizer finished successfully.")
+        else:
+            st.error(f"Standardizer failed with exit code {result.returncode}.")
+        if result.stdout.strip():
+            st.code(result.stdout[-12000:], language="text")
+        if result.stderr.strip():
+            st.code(result.stderr[-12000:], language="text")
+        st.rerun()
+
+
+def render_sectionizer_controls() -> None:
+    st.subheader("Run Sectionizer")
+    if st.button("Run sectionizer", key="run-sectionizer-tab", use_container_width=True):
+        with st.spinner("Running sectionizer..."):
+            result = subprocess.run(
+                [sys.executable, str(RUN_SECTIONIZER_PATH)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+            )
+        st.cache_data.clear()
+        if result.returncode == 0:
+            st.success("Sectionizer finished successfully.")
+        else:
+            st.error(f"Sectionizer failed with exit code {result.returncode}.")
+        if result.stdout.strip():
+            st.code(result.stdout[-12000:], language="text")
+        if result.stderr.strip():
+            st.code(result.stderr[-12000:], language="text")
+        st.rerun()
+
+
+def render_newsletter_generation_controls() -> None:
+    st.subheader("Run Newsletter Generation")
+    if st.button("Run newsletter generation", key="run-newsletter-generator-tab", use_container_width=True):
+        with st.spinner("Running newsletter generation..."):
+            result = subprocess.run(
+                [sys.executable, str(RUN_NEWSLETTER_GENERATOR_PATH)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+            )
+        st.cache_data.clear()
+        if result.returncode == 0:
+            st.success("Newsletter generation finished successfully.")
+        else:
+            st.error(f"Newsletter generation failed with exit code {result.returncode}.")
         if result.stdout.strip():
             st.code(result.stdout[-12000:], language="text")
         if result.stderr.strip():
@@ -1127,15 +1256,17 @@ def main() -> None:
     screener_pending = load_pending_screener_items(db_token)
     standardizer_pending = load_pending_standardizer_items(db_token)
     sectionizer_pending = load_pending_sectionizer_items(db_token)
+    newsletter_generation_pending = load_pending_newsletter_generation_items(db_token)
     runs = load_newsletter_runs(db_token)
 
-    hoarder_tab, screener_tab, standardizer_tab, sectionizer_tab, newsletter_tab = st.tabs(
+    hoarder_tab, screener_tab, standardizer_tab, sectionizer_tab, newsletter_generation_tab, newsletter_tab = st.tabs(
         [
             "1. Hoarder",
             "2. Screener",
             "3. Standardizer",
             "4. Sectionizer",
-            "5. Newsletter",
+            "5. Newsletter Generation",
+            "6. Newsletter",
         ]
     )
 
@@ -1151,6 +1282,7 @@ def main() -> None:
         )
 
     with standardizer_tab:
+        render_standardizer_controls()
         render_pending_queue(
             stage_name="Pending For Standardizer",
             queue_items=standardizer_pending,
@@ -1158,10 +1290,19 @@ def main() -> None:
         )
 
     with sectionizer_tab:
+        render_sectionizer_controls()
         render_pending_queue(
             stage_name="Pending For Sectionizer",
             queue_items=sectionizer_pending,
             empty_message="No standardized documents are waiting for sectionization.",
+        )
+
+    with newsletter_generation_tab:
+        render_newsletter_generation_controls()
+        render_pending_queue(
+            stage_name="Pending For Newsletter Generation",
+            queue_items=newsletter_generation_pending,
+            empty_message="No sectionizer outputs are waiting for newsletter generation.",
         )
 
     with newsletter_tab:

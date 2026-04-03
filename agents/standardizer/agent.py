@@ -50,9 +50,6 @@ except Exception:  # pragma: no cover - optional dependency guard
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 ARTIFACTS_DIR = DATA_DIR / "artifacts"
-LOGS_DIR = PROJECT_ROOT / ".logs"
-RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
-STANDARDIZER_LOG_PATH = LOGS_DIR / f"standardizer-{RUN_TIMESTAMP}.debug.log"
 TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -66,33 +63,7 @@ TEXT_EXTENSIONS = {
 }
 
 
-def _configure_logging() -> logging.Logger:
-    """Attach console and file handlers for standardizer debug logs."""
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
-
-    if not any(isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler) for handler in root_logger.handlers):
-        stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.DEBUG)
-        stream_handler.setFormatter(formatter)
-        root_logger.addHandler(stream_handler)
-
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    resolved_log_path = STANDARDIZER_LOG_PATH.resolve()
-    if not any(
-        isinstance(handler, logging.FileHandler) and Path(getattr(handler, "baseFilename", "")).resolve() == resolved_log_path
-        for handler in root_logger.handlers
-    ):
-        file_handler = logging.FileHandler(resolved_log_path, encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        root_logger.addHandler(file_handler)
-
-    return logging.getLogger(__name__)
-
-
-logger = _configure_logging()
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:

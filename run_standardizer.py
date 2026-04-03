@@ -2,8 +2,44 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Iterable
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+LOGS_DIR = PROJECT_ROOT / ".logs"
+RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
+STANDARDIZER_LOG_PATH = LOGS_DIR / f"standardizer-{RUN_TIMESTAMP}.debug.log"
+
+
+def _configure_logging() -> logging.Logger:
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    if not any(isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler) for handler in root_logger.handlers):
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(logging.DEBUG)
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    resolved_log_path = STANDARDIZER_LOG_PATH.resolve()
+    if not any(
+        isinstance(handler, logging.FileHandler) and Path(getattr(handler, "baseFilename", "")).resolve() == resolved_log_path
+        for handler in root_logger.handlers
+    ):
+        file_handler = logging.FileHandler(resolved_log_path, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+    return logging.getLogger(__name__)
+
+
+logger = _configure_logging()
+logger.debug("Initialized standardizer runner logging. log_path=%s", STANDARDIZER_LOG_PATH)
 
 from agents.hoarder.config import SourceConfig, load_hoarder_config
 from agents.hoarder.sources.filesource.agent import FilesourceHoarderAgent
@@ -12,7 +48,6 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 from agents.screener.agent_hosted import file_metadata_screening_agent
@@ -68,6 +103,8 @@ async def main() -> None:
         help="Run screener before standardizer. Default is false to allow file-based screener input fallback.",
     )
     args = parser.parse_args()
+    logger.debug("Starting standardizer runner with run_screener=%s", args.run_screener)
+    logger.debug("Standardizer debug log path: %s", STANDARDIZER_LOG_PATH)
 
     session_service = InMemorySessionService()
     await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
