@@ -29,6 +29,14 @@ DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 RUN_PIPELINE_PATH = PROJECT_ROOT / "run_pipeline.py"
 RUN_HOARDER_SOURCE_PATH = PROJECT_ROOT / "run_hoarder_source.py"
 RUN_SCREENER_PATH = PROJECT_ROOT / "run_screener.py"
+HOARDER_CONFIG_PATH = PROJECT_ROOT / "agents" / "hoarder" / "config.yaml"
+
+
+def _path_cache_token(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    stat = path.stat()
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
 def apply_admin_theme() -> None:
@@ -217,7 +225,8 @@ def _ensure_dashboard_schema() -> None:
 
 
 @st.cache_data(show_spinner=False)
-def load_newsletter_runs() -> list[dict[str, object]]:
+def load_newsletter_runs(_db_token: str) -> list[dict[str, object]]:
+    del _db_token
     if not DB_PATH.exists():
         return []
 
@@ -250,7 +259,8 @@ def load_newsletter_runs() -> list[dict[str, object]]:
 
 
 @st.cache_data(show_spinner=False)
-def load_pending_screener_items() -> list[dict[str, object]]:
+def load_pending_screener_items(_db_token: str) -> list[dict[str, object]]:
+    del _db_token
     if not DB_PATH.exists():
         return []
 
@@ -275,7 +285,8 @@ def load_pending_screener_items() -> list[dict[str, object]]:
 
 
 @st.cache_data(show_spinner=False)
-def load_hoarder_source_statuses() -> list[dict[str, object]]:
+def load_hoarder_source_statuses(_db_token: str, _config_token: str) -> list[dict[str, object]]:
+    del _db_token, _config_token
     config = load_hoarder_config()
     sources = config.sources
     latest_runs_by_source_id: dict[str, dict[str, object]] = {}
@@ -340,7 +351,8 @@ def load_hoarder_source_statuses() -> list[dict[str, object]]:
 
 
 @st.cache_data(show_spinner=False)
-def load_pending_standardizer_items() -> list[dict[str, object]]:
+def load_pending_standardizer_items(_db_token: str) -> list[dict[str, object]]:
+    del _db_token
     if not DB_PATH.exists():
         return []
 
@@ -387,7 +399,8 @@ def load_pending_standardizer_items() -> list[dict[str, object]]:
 
 
 @st.cache_data(show_spinner=False)
-def load_pending_sectionizer_items() -> list[dict[str, object]]:
+def load_pending_sectionizer_items(_db_token: str) -> list[dict[str, object]]:
+    del _db_token
     if not DB_PATH.exists():
         return []
 
@@ -502,7 +515,8 @@ def save_run_config(newsletter_run_id: int, config: dict[str, object]) -> None:
 
 
 @st.cache_data(show_spinner=False)
-def load_run_detail(newsletter_run_id: int) -> dict[str, object] | None:
+def load_run_detail(newsletter_run_id: int, _db_token: str) -> dict[str, object] | None:
+    del _db_token
     if not DB_PATH.exists():
         return None
 
@@ -860,7 +874,7 @@ def render_screener_controls() -> None:
 def render_hoarder_sources_page() -> None:
     st.subheader("Hoarder Source Agents")
     st.caption("Trigger individual hoarder source agents and inspect the latest run recorded for each source.")
-    statuses = load_hoarder_source_statuses()
+    statuses = load_hoarder_source_statuses(_path_cache_token(DB_PATH), _path_cache_token(HOARDER_CONFIG_PATH))
     if not statuses:
         st.info("No hoarder sources are configured.")
         return
@@ -1065,7 +1079,7 @@ def render_pipeline_controls() -> None:
                     text=True,
                 )
         st.cache_data.clear()
-        refreshed_runs = load_newsletter_runs()
+        refreshed_runs = load_newsletter_runs(_path_cache_token(DB_PATH))
         if refreshed_runs:
             st.session_state["selected_newsletter_run_id"] = int(refreshed_runs[0]["newsletter_run_id"])
         st.sidebar.success(f"Pipeline finished with exit code {result.returncode}")
@@ -1109,10 +1123,11 @@ def main() -> None:
         st.cache_data.clear()
         st.rerun()
 
-    screener_pending = load_pending_screener_items()
-    standardizer_pending = load_pending_standardizer_items()
-    sectionizer_pending = load_pending_sectionizer_items()
-    runs = load_newsletter_runs()
+    db_token = _path_cache_token(DB_PATH)
+    screener_pending = load_pending_screener_items(db_token)
+    standardizer_pending = load_pending_standardizer_items(db_token)
+    sectionizer_pending = load_pending_sectionizer_items(db_token)
+    runs = load_newsletter_runs(db_token)
 
     hoarder_tab, screener_tab, standardizer_tab, sectionizer_tab, newsletter_tab = st.tabs(
         [
@@ -1184,7 +1199,7 @@ def main() -> None:
 
         selected_run_id = run_options[selected_label]
         st.session_state["selected_newsletter_run_id"] = selected_run_id
-        detail = load_run_detail(selected_run_id)
+        detail = load_run_detail(selected_run_id, db_token)
         if detail is None:
             st.error("Selected run could not be loaded from the database.")
             return

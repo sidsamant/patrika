@@ -81,7 +81,9 @@ def load_hoarder_rows_for_screening() -> list[dict[str, Any]]:
 
     with session_scope() as session:
         rows = session.execute(
-            select(HoarderOutput).order_by(HoarderOutput.hoarder_output_id.asc())
+            select(HoarderOutput)
+            .where(HoarderOutput.screened_at.is_(None))
+            .order_by(HoarderOutput.hoarder_output_id.asc())
         ).scalars().all()
 
     results: list[dict[str, Any]] = []
