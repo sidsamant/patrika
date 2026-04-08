@@ -732,8 +732,14 @@ def _configured_newsletter_date(detail: dict[str, object]) -> str:
     if isinstance(config, dict):
         configured = str(config.get("newsletter_date") or "").strip()
         if configured:
-            return configured
-    return _default_run_config(str(detail.get("run_timestamp") or "")).get("newsletter_date", "")
+            return _parse_default_newsletter_date(configured).strftime("%d/%m/%Y")
+    default_value = _default_run_config(str(detail.get("run_timestamp") or "")).get("newsletter_date", "")
+    return _parse_default_newsletter_date(str(default_value)).strftime("%d/%m/%Y")
+
+
+def _format_download_filename(stem: str, newsletter_date: str, extension: str) -> str:
+    normalized = newsletter_date.replace("/", "-").strip() or "newsletter"
+    return f"{stem}_{normalized}.{extension}"
 
 
 def _html_image_src(raw_path: str) -> str:
@@ -783,7 +789,7 @@ def _newsletter_html_bytes(detail: dict[str, object]) -> bytes:
         "<body>",
         "<div class=\"shell\">",
         "<section class=\"hero\">",
-        "<h1>Weekly Newsletter</h1>",
+        "<h1>Gagan Gaze</h1>",
         f"<p>Edition date: {newsletter_date}</p>",
         "</section>",
     ]
@@ -844,7 +850,7 @@ def _newsletter_pdf_bytes(detail: dict[str, object]) -> bytes:
     styles = getSampleStyleSheet()
     newsletter_date = _configured_newsletter_date(detail)
     story: list[object] = [
-        Paragraph("Weekly Newsletter", styles["Title"]),
+        Paragraph("Gagan Gaze", styles["Title"]),
         Spacer(1, 0.15 * inch),
         Paragraph(f"Edition date: {newsletter_date}", styles["Normal"]),
         Spacer(1, 0.2 * inch),
@@ -1150,17 +1156,18 @@ def render_run_detail(detail: dict[str, object]) -> None:
     meta_cols[2].metric("Newsletter Date", _configured_newsletter_date(detail))
 
     export_cols = st.columns(2)
+    newsletter_date = _configured_newsletter_date(detail)
     export_cols[0].download_button(
         "Download HTML",
         data=_newsletter_html_bytes(detail),
-        file_name=f"newsletter_run_{detail['newsletter_run_id']}.html",
+        file_name=_format_download_filename("gagan-gaze", newsletter_date, "html"),
         mime="text/html",
         use_container_width=True,
     )
     export_cols[1].download_button(
         "Download PDF",
         data=_newsletter_pdf_bytes(detail),
-        file_name=f"newsletter_run_{detail['newsletter_run_id']}.pdf",
+        file_name=_format_download_filename("gagan-gaze", newsletter_date, "pdf"),
         mime="application/pdf",
         use_container_width=True,
     )

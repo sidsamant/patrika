@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -28,6 +28,7 @@ NEWSLETTER_OUTPUT_DIR = OUTPUT_DIR / "newsletter"
 STANDARDIZER_DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 HTML_TEMPLATE_NAME = "mobile_newsletter.html.j2"
+NEWSLETTER_TITLE = "Gagan Gaze"
 
 
 def _utc_now() -> datetime:
@@ -38,6 +39,33 @@ def _utc_now() -> datetime:
 def _utc_now_iso() -> str:
     """Return the current UTC timestamp in ISO 8601 format."""
     return _utc_now().isoformat()
+
+
+def _parse_run_date(run_timestamp: str | None) -> date:
+    """Parse a run timestamp into a date for display and file naming."""
+    value = str(run_timestamp or "").strip()
+    if not value:
+        return _utc_now().date()
+    for parser in (
+        lambda text: datetime.fromisoformat(text.replace("Z", "+00:00")).date(),
+        lambda text: datetime.strptime(text, "%Y%m%d-%H%M%S").date(),
+        lambda text: datetime.strptime(text, "%Y-%m-%d").date(),
+    ):
+        try:
+            return parser(value)
+        except ValueError:
+            continue
+    return _utc_now().date()
+
+
+def _format_indian_date(value: date) -> str:
+    """Format a date in Indian dd/mm/yyyy style."""
+    return value.strftime("%d/%m/%Y")
+
+
+def _format_filename_date(value: date) -> str:
+    """Format a date for newsletter filenames."""
+    return value.strftime("%d-%m-%Y")
 
 
 def _ensure_newsletter_schema(connection: object | None = None) -> None:
@@ -187,11 +215,12 @@ def _sorted_story_sections(stories_by_section: dict[str, list[dict[str, Any]]]) 
 
 def _render_markdown(*, run_timestamp: str, stories_by_section: dict[str, list[dict[str, Any]]]) -> str:
     """Render the newsletter markdown from grouped story data."""
+    edition_date = _format_indian_date(_parse_run_date(run_timestamp))
     total_story_count = sum(len(items) for items in stories_by_section.values())
     lines: list[str] = [
-        "# Weekly Newsletter",
+        f"# {NEWSLETTER_TITLE}",
         "",
-        f"- Run timestamp: `{run_timestamp}`",
+        f"- Edition date: `{edition_date}`",
         f"- Total stories: `{total_story_count}`",
         f"- Sections: `{len(stories_by_section)}`",
         "",
@@ -199,6 +228,8 @@ def _render_markdown(*, run_timestamp: str, stories_by_section: dict[str, list[d
 
     for section_name in sorted(stories_by_section):
         section_stories = sorted(stories_by_section[section_name], key=_story_sort_key)
+        lines.append("---")
+        lines.append("")
         lines.append(f"## {section_name}")
         lines.append("")
 
@@ -240,9 +271,11 @@ def _build_newsletter_render_context(*, run_timestamp: str, stories_by_section: 
     """Build a reusable template context for newsletter rendering outputs."""
     sections = _sorted_story_sections(stories_by_section)
     total_story_count = sum(len(section["stories"]) for section in sections)
+    edition_date = _format_indian_date(_parse_run_date(run_timestamp))
     return {
-        "title": "Weekly Newsletter",
+        "title": NEWSLETTER_TITLE,
         "run_timestamp": run_timestamp,
+        "edition_date": edition_date,
         "total_story_count": total_story_count,
         "sections": sections,
     }
@@ -374,17 +407,21 @@ class NewsletterGeneratorAgent(BaseAgent):
             run_timestamp=run_timestamp,
             stories_by_section=dict(stories_by_section),
         )
+        edition_date = _parse_run_date(run_timestamp)
+        file_date = _format_filename_date(edition_date)
 
         NEWSLETTER_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         newsletter_markdown = _render_markdown(run_timestamp=run_timestamp, stories_by_section=dict(stories_by_section))
         newsletter_html = _render_html(template_context=template_context)
-        markdown_path = NEWSLETTER_OUTPUT_DIR / f"newsletter_{run_timestamp}.md"
-        html_path = NEWSLETTER_OUTPUT_DIR / f"newsletter_{run_timestamp}.html"
+        markdown_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}.md"
+        html_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}.html"
         markdown_path.write_text(newsletter_markdown, encoding="utf-8")
         html_path.write_text(newsletter_html, encoding="utf-8")
 
         output_payload = {
+            "title": NEWSLETTER_TITLE,
             "runTimestamp": run_timestamp,
+            "editionDate": _format_indian_date(edition_date),
             "storage": "sqlite.newsletter_runs",
             "newsletterPath": str(markdown_path),
             "newsletterHtmlPath": str(html_path),
