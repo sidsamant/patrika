@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import io
 import subprocess
 from datetime import date, datetime
 from html import escape
@@ -9,10 +8,6 @@ from pathlib import Path
 import sys
 from urllib.parse import urlparse
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 import streamlit as st
 from agents.hoarder.config import load_hoarder_config
 from sqlalchemy import select, text
@@ -737,9 +732,9 @@ def _configured_newsletter_date(detail: dict[str, object]) -> str:
     return _parse_default_newsletter_date(str(default_value)).strftime("%d/%m/%Y")
 
 
-def _format_download_filename(stem: str, newsletter_date: str, extension: str) -> str:
-    normalized = newsletter_date.replace("/", "-").strip() or "newsletter"
-    return f"{stem}_{normalized}.{extension}"
+def _format_download_filename(stem: str, newsletter_date: str, newsletter_run_id: int, extension: str) -> str:
+    normalized_date = _parse_default_newsletter_date(newsletter_date).strftime("%Y-%m-%d")
+    return f"{stem}_{normalized_date}_run-{newsletter_run_id}.{extension}"
 
 
 def _html_image_src(raw_path: str) -> str:
@@ -835,66 +830,12 @@ def _newsletter_html_bytes(detail: dict[str, object]) -> bytes:
     return "\n".join(parts).encode("utf-8")
 
 
-def _newsletter_pdf_bytes(detail: dict[str, object]) -> bytes:
-    output = detail.get("output")
-    sections = output.get("sections") if isinstance(output, dict) else {}
-    buffer = io.BytesIO()
-    document = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        leftMargin=0.6 * inch,
-        rightMargin=0.6 * inch,
-        topMargin=0.6 * inch,
-        bottomMargin=0.6 * inch,
-    )
-    styles = getSampleStyleSheet()
-    newsletter_date = _configured_newsletter_date(detail)
-    story: list[object] = [
-        Paragraph("Gagan Gaze", styles["Title"]),
-        Spacer(1, 0.15 * inch),
-        Paragraph(f"Edition date: {newsletter_date}", styles["Normal"]),
-        Spacer(1, 0.2 * inch),
-    ]
-
-    if isinstance(sections, dict) and sections:
-        for section_name, section_payload in sections.items():
-            story.append(Paragraph(str(section_name), styles["Heading1"]))
-            story.append(Spacer(1, 0.1 * inch))
-            stories = section_payload.get("stories") if isinstance(section_payload, dict) else []
-            if isinstance(stories, list) and stories:
-                for item in stories:
-                    if not isinstance(item, dict):
-                        continue
-                    title = str(item.get("newsletter_title") or "Untitled Story").strip()
-                    summary = str(item.get("summary") or "").strip()
-                    facts = item.get("summary_facts")
-
-                    story.append(Paragraph(title, styles["Heading2"]))
-                    if summary:
-                        story.append(Paragraph(summary, styles["BodyText"]))
-                    if isinstance(facts, list):
-                        for fact in facts:
-                            fact_text = str(fact).strip()
-                            if fact_text:
-                                story.append(Paragraph(f"- {fact_text}", styles["BodyText"]))
-                    story.append(Spacer(1, 0.12 * inch))
-            else:
-                story.append(Paragraph("No stories in this section.", styles["BodyText"]))
-                story.append(Spacer(1, 0.12 * inch))
-    else:
-        markdown = str(detail.get("output_markdown") or "").strip() or "No newsletter content available for this run."
-        story.append(Paragraph(markdown.replace("\n", "<br/>"), styles["BodyText"]))
-
-    document.build(story)
-    return buffer.getvalue()
-
-
 def render_run_list(runs: list[dict[str, object]]) -> None:
     st.subheader("Newsletter Runs")
     if not runs:
         st.info("No newsletter runs found yet.")
         return
-    st.dataframe(runs, use_container_width=True, hide_index=True)
+    st.dataframe(runs, width="stretch", hide_index=True)
 
 
 def render_pending_queue(
@@ -909,7 +850,7 @@ def render_pending_queue(
     if not queue_items:
         st.success(empty_message)
         return
-    st.dataframe(queue_items, use_container_width=True, hide_index=True)
+    st.dataframe(queue_items, width="stretch", hide_index=True)
 
 
 def render_screener_controls() -> None:
@@ -920,7 +861,7 @@ def render_screener_controls() -> None:
         index=0,
         key="screener-tab-backend",
     )
-    if st.button("Run screener", key="run-screener-tab", use_container_width=True):
+    if st.button("Run screener", key="run-screener-tab", width="stretch"):
         with st.spinner(f"Running screener with backend={backend}..."):
             result = subprocess.run(
                 [sys.executable, str(RUN_SCREENER_PATH), "--backend", backend],
@@ -942,7 +883,7 @@ def render_screener_controls() -> None:
 
 def render_standardizer_controls() -> None:
     st.subheader("Run Standardizer")
-    if st.button("Run standardizer", key="run-standardizer-tab", use_container_width=True):
+    if st.button("Run standardizer", key="run-standardizer-tab", width="stretch"):
         with st.spinner("Running standardizer..."):
             result = subprocess.run(
                 [sys.executable, str(RUN_STANDARDIZER_PATH)],
@@ -964,7 +905,7 @@ def render_standardizer_controls() -> None:
 
 def render_sectionizer_controls() -> None:
     st.subheader("Run Sectionizer")
-    if st.button("Run sectionizer", key="run-sectionizer-tab", use_container_width=True):
+    if st.button("Run sectionizer", key="run-sectionizer-tab", width="stretch"):
         with st.spinner("Running sectionizer..."):
             result = subprocess.run(
                 [sys.executable, str(RUN_SECTIONIZER_PATH)],
@@ -986,7 +927,7 @@ def render_sectionizer_controls() -> None:
 
 def render_newsletter_generation_controls() -> None:
     st.subheader("Run Newsletter Generation")
-    if st.button("Run newsletter generation", key="run-newsletter-generator-tab", use_container_width=True):
+    if st.button("Run newsletter generation", key="run-newsletter-generator-tab", width="stretch"):
         with st.spinner("Running newsletter generation..."):
             result = subprocess.run(
                 [sys.executable, str(RUN_NEWSLETTER_GENERATOR_PATH)],
@@ -1025,7 +966,7 @@ def render_hoarder_sources_page() -> None:
         }
         for item in statuses
     ]
-    st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+    st.dataframe(summary_rows, width="stretch", hide_index=True)
 
     for source in statuses:
         with st.container(border=True):
@@ -1040,7 +981,7 @@ def render_hoarder_sources_page() -> None:
             if st.button(
                 run_label,
                 key=f"run-hoarder-source-{source['source_id']}",
-                use_container_width=True,
+                width="stretch",
                 disabled=not bool(source["enabled"]),
             ):
                 with st.spinner(f"Running hoarder source {source['source_id']}..."):
@@ -1099,7 +1040,7 @@ def render_story_card(story: dict[str, object], related_detail: dict[str, object
                     continue
                 column = image_cols[index % len(image_cols)]
                 with column:
-                    st.image(artifact_path, caption=artifact_path, use_container_width=True)
+                    st.image(artifact_path, caption=artifact_path, width="stretch")
         else:
             st.caption("No images associated with this source.")
 
@@ -1109,12 +1050,12 @@ def render_story_card(story: dict[str, object], related_detail: dict[str, object
                 evaluations = output_payload.get("section_evaluations")
                 if isinstance(evaluations, list) and evaluations:
                     st.markdown("**Section Scores**")
-                    st.dataframe(evaluations, use_container_width=True, hide_index=True)
+                    st.dataframe(evaluations, width="stretch", hide_index=True)
 
             lineage_sources = related_detail.get("lineage_sources")
             if isinstance(lineage_sources, list) and lineage_sources:
                 st.markdown("**Source Lineage**")
-                st.dataframe(lineage_sources, use_container_width=True, hide_index=True)
+                st.dataframe(lineage_sources, width="stretch", hide_index=True)
 
             st.markdown("**Instruction Path**")
             st.code(str(related_detail.get("llm_instruction") or ""), language="text")
@@ -1130,7 +1071,7 @@ def render_run_configuration(detail: dict[str, object]) -> None:
         st.subheader("Run Configuration")
         st.caption("These settings are persisted per newsletter run and drive the review exports.")
         selected_date = st.date_input("Newsletter date", value=newsletter_date, format="YYYY-MM-DD")
-        submitted = st.form_submit_button("Save configuration", use_container_width=True)
+        submitted = st.form_submit_button("Save configuration", width="stretch")
 
     if submitted:
         save_run_config(
@@ -1155,21 +1096,15 @@ def render_run_detail(detail: dict[str, object]) -> None:
     meta_cols[1].metric("Created At", str(detail["created_at"]))
     meta_cols[2].metric("Newsletter Date", _configured_newsletter_date(detail))
 
-    export_cols = st.columns(2)
+    export_cols = st.columns(1)
+    newsletter_run_id = int(detail["newsletter_run_id"])
     newsletter_date = _configured_newsletter_date(detail)
     export_cols[0].download_button(
         "Download HTML",
         data=_newsletter_html_bytes(detail),
-        file_name=_format_download_filename("gagan-gaze", newsletter_date, "html"),
+        file_name=_format_download_filename("gagan-gaze", newsletter_date, newsletter_run_id, "html"),
         mime="text/html",
-        use_container_width=True,
-    )
-    export_cols[1].download_button(
-        "Download PDF",
-        data=_newsletter_pdf_bytes(detail),
-        file_name=_format_download_filename("gagan-gaze", newsletter_date, "pdf"),
-        mime="application/pdf",
-        use_container_width=True,
+        width="stretch",
     )
 
     overview_tab, config_tab, markdown_tab = st.tabs(["Overview", "Configuration", "Rendered Markdown"])
@@ -1205,7 +1140,7 @@ def render_run_detail(detail: dict[str, object]) -> None:
 def render_pipeline_controls() -> None:
     st.sidebar.header("Pipeline")
     backend = st.sidebar.selectbox("Screener backend", ["hosted", "ollama"], index=0)
-    if st.sidebar.button("Run pipeline", use_container_width=True):
+    if st.sidebar.button("Run pipeline", width="stretch"):
         with st.sidebar:
             with st.spinner("Running pipeline..."):
                 result = subprocess.run(
@@ -1246,7 +1181,7 @@ def main() -> None:
           </p>
           <div class="dashboard-chip-row">
             <span class="dashboard-chip">SQLite-backed lineage</span>
-            <span class="dashboard-chip">HTML + PDF review exports</span>
+            <span class="dashboard-chip">HTML review exports</span>
             <span class="dashboard-chip">Source, image, and section traceability</span>
           </div>
         </section>
@@ -1255,7 +1190,7 @@ def main() -> None:
     )
     st.caption(f"SQLite source: {DB_PATH}")
     render_pipeline_controls()
-    if st.sidebar.button("Refresh data", use_container_width=True):
+    if st.sidebar.button("Refresh data", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 

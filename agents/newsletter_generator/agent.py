@@ -65,7 +65,7 @@ def _format_indian_date(value: date) -> str:
 
 def _format_filename_date(value: date) -> str:
     """Format a date for newsletter filenames."""
-    return value.strftime("%d-%m-%Y")
+    return value.strftime("%Y-%m-%d")
 
 
 def _ensure_newsletter_schema(connection: object | None = None) -> None:
@@ -413,10 +413,6 @@ class NewsletterGeneratorAgent(BaseAgent):
         NEWSLETTER_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         newsletter_markdown = _render_markdown(run_timestamp=run_timestamp, stories_by_section=dict(stories_by_section))
         newsletter_html = _render_html(template_context=template_context)
-        markdown_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}.md"
-        html_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}.html"
-        markdown_path.write_text(newsletter_markdown, encoding="utf-8")
-        html_path.write_text(newsletter_html, encoding="utf-8")
 
         output_payload = {
             "title": NEWSLETTER_TITLE,
@@ -425,7 +421,6 @@ class NewsletterGeneratorAgent(BaseAgent):
             "storage": "sqlite.newsletter_runs",
             "newsletterPath": str(markdown_path),
             "newsletterHtmlPath": str(html_path),
-            "printableHtmlPath": str(html_path),
             "generatedAt": _utc_now_iso(),
             "sectionCount": len(stories_by_section),
             "storyCount": sum(len(items) for items in stories_by_section.values()),
@@ -451,6 +446,13 @@ class NewsletterGeneratorAgent(BaseAgent):
                 sectionizer_output_ids=sectionizer_output_ids,
             )
 
+        markdown_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}_run-{newsletter_run_id}.md"
+        html_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}_run-{newsletter_run_id}.html"
+        markdown_path.write_text(newsletter_markdown, encoding="utf-8")
+        html_path.write_text(newsletter_html, encoding="utf-8")
+
+        output_payload["newsletterPath"] = str(markdown_path)
+        output_payload["newsletterHtmlPath"] = str(html_path)
         output_payload["newsletterRunId"] = newsletter_run_id
         output_payload["sectionizerOutputIds"] = sectionizer_output_ids
         ctx.session.state["newsletter_markdown_path"] = str(markdown_path)

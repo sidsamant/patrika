@@ -274,7 +274,7 @@ Media and editorial side tables attached to that flow are:
   - `run_observability_dashboard.py`
     - run list
     - run detail
-    - export HTML/PDF generation
+    - export HTML generation
 
 ### `newsletter_run_sectionizer_outputs`
 - Purpose:
@@ -307,7 +307,7 @@ Media and editorial side tables attached to that flow are:
     - schema creation in `_ensure_dashboard_schema()`
     - reads in `_load_run_config()`
     - inserts/updates in `save_run_config()`
-    - used when generating downloadable HTML/PDF exports
+    - used when generating downloadable HTML exports
 
 ## Notes
 
