@@ -764,9 +764,10 @@ def _newsletter_html_bytes(detail: dict[str, object]) -> bytes:
         "<style>",
         "body{margin:0;background:#eef4fb;font-family:Arial,sans-serif;color:#1a2740;}",
         ".shell{max-width:760px;margin:0 auto;padding:24px 14px 36px;}",
-        ".hero{background:linear-gradient(135deg,#16325c,#1b5bbf);color:#fff;border-radius:24px;padding:28px 24px;box-shadow:0 16px 42px rgba(18,46,87,.22);}",
+        ".hero{background:linear-gradient(135deg,#16325c,#1b5bbf);color:#fff;border-radius:24px;padding:28px 24px;box-shadow:0 16px 42px rgba(18,46,87,.22);text-align:center;}",
         ".hero h1{margin:0 0 8px;font-size:28px;line-height:1.1;}",
-        ".hero p{margin:0;color:rgba(255,255,255,.86);font-size:14px;}",
+        ".hero .slogan{margin:0 0 10px;color:rgba(255,255,255,.78);font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:700;}",
+        ".hero p{margin:0;color:rgba(255,255,255,.86);font-size:14px;text-align:left;}",
         ".section{background:#fff;border-radius:22px;padding:22px 18px;margin-top:18px;box-shadow:0 10px 28px rgba(18,46,87,.08);}",
         ".section h2{margin:0 0 14px;color:#16325c;font-size:22px;}",
         ".story{padding:0 0 18px;margin:0 0 18px;border-bottom:1px solid #e3ebf4;}",
@@ -785,7 +786,8 @@ def _newsletter_html_bytes(detail: dict[str, object]) -> bytes:
         "<div class=\"shell\">",
         "<section class=\"hero\">",
         "<h1>Gagan Gaze</h1>",
-        f"<p>Edition date: {newsletter_date}</p>",
+        "<div class=\"slogan\">India for Space</div>",
+        f"<p>{newsletter_date}</p>",
         "</section>",
     ]
 

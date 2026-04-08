@@ -37,12 +37,22 @@
     .hero {
       padding: 28px 24px 18px 24px;
       background: linear-gradient(180deg, #fbf2df 0%, #fffaf2 100%);
+      text-align: center;
     }
     .hero h1 {
       margin: 0 0 10px 0;
       font-size: 28px;
       line-height: 1.2;
       color: #8c2f1f;
+    }
+    .hero .slogan {
+      margin: -2px 0 12px 0;
+      color: #ad5b20;
+      font-size: 13px;
+      line-height: 1.4;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
     }
     .hero p {
       margin: 0;
@@ -61,6 +71,7 @@
       font-weight: 700;
       letter-spacing: 0.04em;
       text-transform: uppercase;
+      text-align: left;
     }
     .section-block {
       padding: 0 24px 18px 24px;
@@ -180,8 +191,9 @@
       <tr>
         <td class="hero">
           <h1>{{ title }}</h1>
+          <div class="slogan">{{ slogan }}</div>
           <p>Total stories: {{ total_story_count }}<br>Sections: {{ sections|length }}</p>
-          <div class="edition">Edition Date: {{ edition_date }}</div>
+          <div class="edition">{{ edition_date }}</div>
         </td>
       </tr>
       {% for section in sections %}

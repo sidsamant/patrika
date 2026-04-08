@@ -29,6 +29,7 @@ STANDARDIZER_DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 HTML_TEMPLATE_NAME = "mobile_newsletter.html.j2"
 NEWSLETTER_TITLE = "Gagan Gaze"
+NEWSLETTER_SLOGAN = "India for Space"
 
 
 def _utc_now() -> datetime:
@@ -274,6 +275,7 @@ def _build_newsletter_render_context(*, run_timestamp: str, stories_by_section: 
     edition_date = _format_indian_date(_parse_run_date(run_timestamp))
     return {
         "title": NEWSLETTER_TITLE,
+        "slogan": NEWSLETTER_SLOGAN,
         "run_timestamp": run_timestamp,
         "edition_date": edition_date,
         "total_story_count": total_story_count,
