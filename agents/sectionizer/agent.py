@@ -20,6 +20,7 @@ from google.genai import types
 from sqlalchemy import text
 
 from db.standardizer_db import (
+    SectionizerCategory,
     SectionizerOutput,
     SectionizerOutputDocument,
     ensure_standardizer_schema,
@@ -179,10 +180,12 @@ def _persist_row_output(
     run_timestamp = RUN_TIMESTAMP
     source_path = str(row_output_payload.get("source_path") or "").strip() or None
     match_count = len(row_output_payload.get("matches") or []) if isinstance(row_output_payload.get("matches"), list) else 0
+    category_id = row_output_payload.get("category_id")
     llm_instruction = str(row_output_payload.get("llm_instruction") or "").strip() or None
     llm_content = str(row_output_payload.get("llm_content") or "").strip() or None
     record = SectionizerOutput(
         doc_id=row.get("doc_id"),
+        category_id=category_id if isinstance(category_id, int) else None,
         output_path="",
         source_path=source_path,
         llm_instruction=llm_instruction,
@@ -206,6 +209,7 @@ def _persist_row_output(
     return {
         "sectionizer_output_id": sectionizer_output_id,
         "doc_id": row.get("doc_id"),
+        "category_id": category_id if isinstance(category_id, int) else None,
         "source_path": source_path,
         "llm_instruction": llm_instruction,
         "llm_content": llm_content,
@@ -228,11 +232,43 @@ def _parse_json_object(raw_text: str | None) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _load_config() -> dict[str, Any]:
-    """Load the sectionizer configuration file from disk."""
-    config = _parse_json_object(_read_text_if_exists(CONFIG_PATH))
-    logger.debug("Loaded sectionizer config from %s: %s", CONFIG_PATH, json.dumps(config, ensure_ascii=True))
-    return config
+def _load_categories_from_db() -> list[dict[str, Any]]:
+    """Load sectionizer categories from SQLite, using the JSON file only as DB bootstrap input."""
+    _ensure_sectionizer_schema()
+    try:
+        with session_scope() as session:
+            records = (
+                session.query(SectionizerCategory)
+                .order_by(SectionizerCategory.sectionizer_category_id.asc())
+                .all()
+            )
+    except Exception:
+        logger.exception("Failed loading sectionizer categories from %s", STANDARDIZER_DB_PATH)
+        return []
+
+    categories: list[dict[str, Any]] = []
+    for record in records:
+        try:
+            rules = json.loads(record.rules)
+        except json.JSONDecodeError:
+            rules = []
+
+        categories.append(
+            {
+                "sectionizer_category_id": int(record.sectionizer_category_id),
+                "name": str(record.name).strip(),
+                "objective": str(record.objective).strip() if isinstance(record.objective, str) and record.objective.strip() else None,
+                "min_score": float(record.min_score),
+                "rules": rules if isinstance(rules, list) else [],
+            }
+        )
+
+    logger.debug(
+        "Loaded %d sectionizer categories from sqlite.sectionizer_categories (bootstrap source=%s)",
+        len(categories),
+        CONFIG_PATH,
+    )
+    return categories
 
 
 def _load_prompt_template() -> str:
@@ -378,9 +414,12 @@ def _normalize_section_definition(raw_section: Any) -> dict[str, Any] | None:
         return None
 
     min_score = _to_score(raw_section.get("min_score"))
+    objective = str(raw_section.get("objective") or "").strip() or None
     rules = _normalize_plaintext_rules(raw_section.get("rules"))
     return {
+        "sectionizer_category_id": raw_section.get("sectionizer_category_id"),
         "name": name,
+        "objective": objective,
         "min_score": min_score,
         "rules": rules,
     }
@@ -579,7 +618,9 @@ def _normalize_section_result(section_def: dict[str, Any], raw_section: dict[str
     summary_facts = _to_string_list(raw_section.get("summary_facts") or raw_section.get("facts"))
 
     return {
+        "category_id": section_def.get("sectionizer_category_id"),
         "section": str(section_def.get("name") or "").strip(),
+        "objective": str(section_def.get("objective") or "").strip(),
         "score": computed_score,
         "min_score": min_score,
         "matched_rule_count": sum(1 for item in normalized_rule_scores if item["score"] > 0),
@@ -612,6 +653,14 @@ def _normalize_llm_result(section_defs: list[dict[str, Any]], raw_payload: dict[
     return evaluations, matches, document_summary
 
 
+def _pick_primary_match(matches: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the highest-scoring passing match for DB association."""
+    if not matches:
+        return None
+    first_match = matches[0]
+    return first_match if isinstance(first_match, dict) else None
+
+
 def _content_to_text(content: types.Content | None) -> str:
     """Flatten ADK content parts into a single debug-friendly text string."""
     if content is None:
@@ -629,8 +678,7 @@ class SectionizerAgent(BaseAgent):
 
     def __init__(self) -> None:
         """Initialize the sectionizer agent and its internal ADK LLM reviewer."""
-        config = _load_config()
-        section_defs = _normalize_section_definitions(config.get("sections"))
+        section_defs = _normalize_section_definitions(_load_categories_from_db())
         static_instruction = _build_static_instruction(section_defs)
 
         reviewer = LlmAgent(
@@ -659,8 +707,7 @@ class SectionizerAgent(BaseAgent):
         if user_prompt:
             logger.debug("Sectionizer upstream runner prompt (not forwarded to Gemini): %s", user_prompt)
 
-        config = _load_config()
-        section_defs = _normalize_section_definitions(config.get("sections"))
+        section_defs = _normalize_section_definitions(_load_categories_from_db())
         logger.debug("Sectionizer will evaluate %d section definitions.", len(section_defs))
 
         standardized_rows, row_source = _load_standardized_rows(ctx)
@@ -694,12 +741,17 @@ class SectionizerAgent(BaseAgent):
                 llm_content = str(ctx.session.state.get("sectionizer_runtime_document_payload") or "").strip()
                 raw_payload = _extract_json_object(raw_response)
                 evaluations, matches, document_summary = _normalize_llm_result(section_defs, raw_payload)
+                primary_match = _pick_primary_match(matches)
+                primary_category_id = primary_match.get("category_id") if isinstance(primary_match, dict) else None
                 row_output_payload = {
                     "rowSource": row_source,
-                    "sectionConfigPath": str(CONFIG_PATH),
+                    "sectionConfigSource": "sqlite.sectionizer_categories",
+                    "sectionConfigBootstrapPath": str(CONFIG_PATH),
                     "promptTemplatePath": str(PROMPT_TEMPLATE_PATH),
                     "runTimestamp": RUN_TIMESTAMP,
                     "doc_id": row.get("doc_id"),
+                    "category_id": primary_category_id if isinstance(primary_category_id, int) else None,
+                    "category_name": primary_match.get("section") if isinstance(primary_match, dict) else None,
                     "source_path": _path_get(row, "metadata.filesystem.path")
                     or _path_get(row, "metadata.source.path"),
                     "llm_instruction": llm_instruction,
@@ -731,7 +783,8 @@ class SectionizerAgent(BaseAgent):
         matched_rows = sum(1 for item in persisted_outputs if item.get("match_count"))
         output_payload = {
             "rowSource": row_source,
-            "sectionConfigPath": str(CONFIG_PATH),
+            "sectionConfigSource": "sqlite.sectionizer_categories",
+            "sectionConfigBootstrapPath": str(CONFIG_PATH),
             "promptTemplatePath": str(PROMPT_TEMPLATE_PATH),
             "runTimestamp": RUN_TIMESTAMP,
             "totalRows": len(standardized_rows),
