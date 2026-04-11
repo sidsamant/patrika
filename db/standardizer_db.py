@@ -4,15 +4,20 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Iterator
+import re
+from typing import Iterator, Literal
 
+import yaml
 from sqlalchemy import Float, ForeignKey, Integer, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 SECTIONIZER_CONFIG_PATH = PROJECT_ROOT / "agents" / "sectionizer" / "config.json"
+WEBSITE_ARTICLES_DIR = PROJECT_ROOT.parent / "newsletter_website" / "src" / "content" / "articles"
 DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
+HomepageSlot = Literal["headline", "latest"]
+HOMEPAGE_SLOTS: tuple[HomepageSlot, ...] = ("headline", "latest")
 
 
 def utc_now() -> datetime:
@@ -142,6 +147,9 @@ class SectionizerOutput(Base):
     sectionizer_output_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     doc_id: Mapped[int] = mapped_column(Integer, ForeignKey("documents.doc_id"), nullable=False)
     category_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("sectionizer_categories.sectionizer_category_id"), nullable=True)
+    homepage_slot: Mapped[HomepageSlot | None] = mapped_column(Text, nullable=True)
+    homepage_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    homepage_active: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_path: Mapped[str] = mapped_column(Text, nullable=False)
     source_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -193,6 +201,19 @@ class NewsletterRunConfig(Base):
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class HomepageItem(Base):
+    __tablename__ = "homepage_items"
+
+    homepage_item_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    slot: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 engine = create_engine(DATABASE_URL, future=True)
 SessionLocal = sessionmaker(
     bind=engine,
@@ -209,6 +230,37 @@ def _ensure_column(table_name: str, column_name: str, column_sql: str) -> None:
     if column_name not in existing_columns:
         with engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"))
+
+
+def _ensure_homepage_slot_constraints() -> None:
+    allowed_values_sql = ", ".join(f"'{slot}'" for slot in HOMEPAGE_SLOTS)
+    trigger_specs = {
+        "validate_sectionizer_outputs_homepage_slot_insert": f"""
+            CREATE TRIGGER IF NOT EXISTS validate_sectionizer_outputs_homepage_slot_insert
+            BEFORE INSERT ON sectionizer_outputs
+            FOR EACH ROW
+            WHEN NEW.homepage_slot IS NOT NULL
+             AND TRIM(NEW.homepage_slot) <> ''
+             AND NEW.homepage_slot NOT IN ({allowed_values_sql})
+            BEGIN
+              SELECT RAISE(ABORT, 'invalid sectionizer_outputs.homepage_slot');
+            END;
+        """,
+        "validate_sectionizer_outputs_homepage_slot_update": f"""
+            CREATE TRIGGER IF NOT EXISTS validate_sectionizer_outputs_homepage_slot_update
+            BEFORE UPDATE OF homepage_slot ON sectionizer_outputs
+            FOR EACH ROW
+            WHEN NEW.homepage_slot IS NOT NULL
+             AND TRIM(NEW.homepage_slot) <> ''
+             AND NEW.homepage_slot NOT IN ({allowed_values_sql})
+            BEGIN
+              SELECT RAISE(ABORT, 'invalid sectionizer_outputs.homepage_slot');
+            END;
+        """,
+    }
+    with engine.begin() as connection:
+        for sql in trigger_specs.values():
+            connection.execute(text(sql))
 
 
 def _load_sectionizer_seed_categories() -> list[dict[str, object]]:
@@ -283,6 +335,102 @@ def _seed_sectionizer_categories() -> None:
         session.close()
 
 
+def _extract_frontmatter(raw_text: str) -> dict[str, object]:
+    if not raw_text.startswith("---"):
+        return {}
+
+    match = re.match(r"^---\r?\n(.*?)\r?\n---", raw_text, flags=re.DOTALL)
+    if not match:
+        return {}
+
+    try:
+        loaded = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _load_homepage_seed_items() -> list[dict[str, object]]:
+    if not WEBSITE_ARTICLES_DIR.exists():
+        return []
+
+    article_rows: list[dict[str, object]] = []
+    for article_file in WEBSITE_ARTICLES_DIR.glob("*/index.mdx"):
+        try:
+            frontmatter = _extract_frontmatter(article_file.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+
+        article_id = article_file.parent.name
+        if not article_id:
+            continue
+
+        article_rows.append(
+            {
+                "article_id": article_id,
+                "is_main": bool(frontmatter.get("isMainHeadline") is True),
+                "is_sub": bool(frontmatter.get("isSubHeadline") is True),
+                "published_time": str(frontmatter.get("publishedTime") or ""),
+            }
+        )
+
+    article_rows.sort(key=lambda row: str(row.get("published_time") or ""), reverse=True)
+    if not article_rows:
+        return []
+
+    seed_items: list[dict[str, object]] = []
+    used_article_ids: set[str] = set()
+
+    main_articles = [row for row in article_rows if bool(row.get("is_main"))]
+    if main_articles:
+        article_id = str(main_articles[0]["article_id"])
+        seed_items.append({"source_id": article_id, "slot": "headline", "position": 1})
+        used_article_ids.add(article_id)
+
+    sub_articles = [row for row in article_rows if bool(row.get("is_sub")) and str(row.get("article_id")) not in used_article_ids]
+    for index, row in enumerate(sub_articles[:4], start=1):
+        article_id = str(row["article_id"])
+        seed_items.append({"source_id": article_id, "slot": "headline", "position": index + 1})
+        used_article_ids.add(article_id)
+
+    latest_articles = [row for row in article_rows if str(row.get("article_id")) not in used_article_ids]
+    for index, row in enumerate(latest_articles[:6], start=1):
+        article_id = str(row["article_id"])
+        seed_items.append({"source_id": article_id, "slot": "latest", "position": index})
+        used_article_ids.add(article_id)
+
+    return seed_items
+
+
+def _seed_homepage_items() -> None:
+    seed_items = _load_homepage_seed_items()
+    if not seed_items:
+        return
+
+    session = SessionLocal()
+    try:
+        existing_count = session.query(HomepageItem).count()
+        if existing_count > 0:
+            return
+
+        timestamp = utc_now_iso()
+        for item in seed_items:
+            session.add(
+                HomepageItem(
+                    source_type="article",
+                    source_id=str(item["source_id"]),
+                    slot=str(item["slot"]),
+                    position=int(item["position"]),
+                    is_active=1,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+        session.commit()
+    finally:
+        session.close()
+
+
 def ensure_standardizer_schema() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(engine)
@@ -290,6 +438,9 @@ def ensure_standardizer_schema() -> None:
     _ensure_column("screened_files", "hoarder_output_id", "INTEGER")
     _ensure_column("screened_files", "processed_at", "TEXT")
     _ensure_column("sectionizer_outputs", "category_id", "INTEGER")
+    _ensure_column("sectionizer_outputs", "homepage_slot", "TEXT")
+    _ensure_column("sectionizer_outputs", "homepage_position", "INTEGER")
+    _ensure_column("sectionizer_outputs", "homepage_active", "INTEGER")
     _ensure_column("sectionizer_outputs", "source_path", "TEXT")
     _ensure_column("sectionizer_outputs", "llm_instruction", "TEXT")
     _ensure_column("sectionizer_outputs", "llm_content", "TEXT")
@@ -298,6 +449,7 @@ def ensure_standardizer_schema() -> None:
     _ensure_column("newsletter_runs", "llm_instruction", "TEXT")
     _ensure_column("newsletter_runs", "llm_content", "TEXT")
     _ensure_column("newsletter_runs", "output_html", "TEXT")
+    _ensure_homepage_slot_constraints()
     _seed_sectionizer_categories()
 
 
