@@ -91,8 +91,9 @@ class PersistentHoarderSequentialAgent(SequentialAgent):
         async for event in super()._run_async_impl(ctx):
             yield event
 
+        import asyncio
         raw_file_list = ctx.session.state.get("file_list")
-        persisted_count = persist_hoarder_payload(raw_file_list)
+        persisted_count = await asyncio.to_thread(persist_hoarder_payload, raw_file_list)
         logger.debug("Persisted %d hoarder rows to DB", persisted_count)
 
     async def _run_live_impl(self, ctx: InvocationContext):
