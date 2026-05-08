@@ -18,7 +18,7 @@ from .sources.slack.agent import create_slack_hoarder_agent
 from .sources.twitter.agent import create_twitter_hoarder_agent
 from .sources.whatsapp.agent import create_whatsapp_hoarder_agent
 from .sources.websource.agent import create_websource_hoarder_agent
-from .storage import DB_PATH, persist_hoarder_payload
+from .storage import persist_hoarder_payload
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -93,7 +93,7 @@ class PersistentHoarderSequentialAgent(SequentialAgent):
 
         raw_file_list = ctx.session.state.get("file_list")
         persisted_count = persist_hoarder_payload(raw_file_list)
-        logger.debug("Persisted %d hoarder rows to %s", persisted_count, DB_PATH)
+        logger.debug("Persisted %d hoarder rows to DB", persisted_count)
 
     async def _run_live_impl(self, ctx: InvocationContext):
         """Mirror async execution for live runs."""
