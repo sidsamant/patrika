@@ -10,6 +10,10 @@ The main content lineage through the shared DB is:
 
 `hoarder_outputs -> screened_files -> documents -> sectionizer_outputs -> newsletter_runs`
 
+Section definitions that drive sectionizer scoring live in:
+
+`sectionizer_categories` (FK: `sectionizer_outputs.category_id`)
+
 The relation tables between those stages are:
 
 - `document_screened_files`
@@ -215,19 +219,43 @@ Media and editorial side tables attached to that flow are:
 
 ## Sectionizer
 
+### `sectionizer_categories`
+- Purpose:
+  Stores the editable list of newsletter sections (categories) that the sectionizer scores documents against. This is the runtime source of truth for section definitions — the agent reads from this table, not from any JSON file.
+- Key columns:
+  - `sectionizer_category_id`: primary key
+  - `name`: unique section name (e.g., `"Engineering"`, `"Executive"`)
+  - `objective`: optional free-text description of what belongs in this section
+  - `min_score`: float threshold (0.0–1.0); a document must score at or above this to match
+  - `rules`: JSON-serialized list of plain-text rule strings sent to the LLM
+  - `created_at`, `updated_at`: ISO 8601 timestamps
+- Bootstrap:
+  On first run, `ensure_standardizer_schema()` calls `_seed_sectionizer_categories()`. If the table is empty **and** `agents/sectionizer/config.json` exists, it seeds the table from that file. Once rows exist the file is ignored. After seeding, categories are managed directly in the DB (via the admin panel or SQL).
+- Used in code:
+  - `db/standardizer_db.py`
+    - ORM model `SectionizerCategory`
+    - seeded in `_seed_sectionizer_categories()` (called by `ensure_standardizer_schema()`)
+  - `agents/sectionizer/agent.py`
+    - loaded at agent init and at runtime in `_load_categories_from_db()`
+  - `sectionizer_outputs.category_id` references this table (FK)
+
 ### `sectionizer_outputs`
 - Purpose:
   Append-only sectionizer results for each processed document, including persisted LLM input/output traces.
 - Key columns:
-  - `sectionizer_output_id`
-  - `doc_id`
-  - `source_path`
-  - `llm_instruction`
-  - `llm_content`
-  - `output_json`
-  - `match_count`
-  - `run_timestamp`
-  - `created_at`
+  - `sectionizer_output_id`: primary key
+  - `doc_id`: FK to `documents`
+  - `category_id`: FK to `sectionizer_categories`; the highest-scoring passing category for this document (nullable — no match)
+  - `source_path`: resolved document path from metadata
+  - `llm_instruction`: the static prompt rendered from `prompt_template.md` + section definitions
+  - `llm_content`: the per-document user message sent to Gemini
+  - `output_json`: full serialized payload including all section evaluations and matches
+  - `match_count`: number of sections that passed `min_score`
+  - `run_timestamp`: `YYYYMMDD-HHMMSS` string from the agent run that created this row
+  - `homepage_slot`: editorial slot for the newsletter website (`"headline"` or `"latest"`); constrained by DB trigger; nullable
+  - `homepage_position`: integer ordering within the slot; nullable
+  - `homepage_active`: 0/1 flag; nullable
+  - `created_at`: ISO 8601 timestamp
 - Used in code:
   - `agents/sectionizer/agent.py`
     - schema creation in `_ensure_sectionizer_schema()`
@@ -291,6 +319,26 @@ Media and editorial side tables attached to that flow are:
   - `run_observability_dashboard.py`
     - loads newsletter run detail and lineage
 
+## Website / Homepage
+
+### `homepage_items`
+- Purpose:
+  Stores the editorial layout of the newsletter website homepage — which articles appear in which slot and in what order. Managed separately from the pipeline; seeded from article frontmatter in the sibling `newsletter_website` project.
+- Key columns:
+  - `homepage_item_id`: primary key
+  - `source_type`: type of the referenced item (currently always `"article"`)
+  - `source_id`: article directory slug (matches `newsletter_website/src/content/articles/<slug>/`)
+  - `slot`: `"headline"` or `"latest"`
+  - `position`: integer ordering within the slot
+  - `is_active`: 0/1 flag
+  - `created_at`, `updated_at`
+- Bootstrap:
+  `_seed_homepage_items()` (called by `ensure_standardizer_schema()`) populates this table on first run by reading `publishedTime`, `isMainHeadline`, and `isSubHeadline` frontmatter fields from `.mdx` files in `newsletter_website/src/content/articles/`. Skipped if the table already has rows.
+- Used in code:
+  - `db/standardizer_db.py`
+    - ORM model `HomepageItem`
+    - seeded in `_seed_homepage_items()` (called by `ensure_standardizer_schema()`)
+
 ## Dashboard / Editorial Configuration
 
 ### `newsletter_run_configs`
@@ -311,6 +359,8 @@ Media and editorial side tables attached to that flow are:
 
 ## Notes
 
-- Some tables are created in agent modules and also re-created defensively in `run_observability_dashboard.py` so the dashboard can work against older DB files.
-- `newsletter_runs` currently includes `llm_instruction` and `llm_content` columns even though the newsletter generator is not actively calling an LLM in the current implementation.
+- Schema bootstrap is centralized in `ensure_standardizer_schema()` in `db/standardizer_db.py`. Individual agent `_ensure_*()` functions are thin wrappers that call this central function — they do not create tables independently.
+- `newsletter_runs` includes `llm_instruction` and `llm_content` columns even though the newsletter generator is not actively calling an LLM in the current implementation. These columns are reserved for future use.
+- `sectionizer_categories` is the runtime source of truth for section definitions. `agents/sectionizer/config.json` is a one-time seed file only — it is read to populate the table when the table is empty, and ignored thereafter.
+- The `sectionizer_outputs.homepage_slot`, `homepage_position`, and `homepage_active` columns are set by the editorial/admin layer (not by the sectionizer agent itself) for website homepage placement.
 - The shared DB now functions as the main lineage store across the whole pipeline, not only as a standardizer output database.

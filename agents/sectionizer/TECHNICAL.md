@@ -8,7 +8,7 @@
 
 1. The ADK runner invokes `SectionizerAgent._run_async_impl`.
 2. The agent logs the incoming ADK user message from `ctx.user_content` for debugging.
-3. `_load_config()` reads `agents/sectionizer/config.json` and parses the top-level JSON object.
+3. `_load_categories_from_db()` queries the `sectionizer_categories` table in `data/standardizer.db` for all active section definitions.
 4. `_load_prompt_template()` reads `agents/sectionizer/prompt_template.md`.
 5. `_load_standardized_rows()` resolves input rows from `data/standardizer.db`, table `documents`. If the database is missing or empty, the agent falls back to an empty list.
 6. For each document row, `_render_prompt()` injects:
@@ -60,20 +60,44 @@ Rows are loaded from SQLite only.
 
 ## Section Configuration
 
-`config.json` contains a `sections` array. Each section needs:
+Section definitions are stored in the `sectionizer_categories` table in `data/standardizer.db`, not in a JSON file at runtime. The agent calls `_load_categories_from_db()` which queries `sectionizer_categories` via SQLAlchemy ORM (`SectionizerCategory` model in `db/standardizer_db.py`).
+
+Each row in `sectionizer_categories` provides:
+
+| Column | Type | Description |
+|---|---|---|
+| `sectionizer_category_id` | INTEGER | Primary key; passed through as `category_id` in outputs |
+| `name` | TEXT | Section name shown in newsletter and output JSON |
+| `objective` | TEXT (nullable) | Optional free-text description sent to the LLM |
+| `min_score` | FLOAT | Threshold (0.0–1.0); document must score at or above this to match |
+| `rules` | TEXT | JSON-serialized list of plain-text rule strings |
+| `created_at`, `updated_at` | TEXT | ISO 8601 timestamps |
+
+Rules are plain-text instructions for the LLM. The LLM receives each rule exactly as stored and is expected to score every rule on a `0.0` to `1.0` scale.
+
+### Seed Bootstrap (one-time only)
+
+`agents/sectionizer/config.json` is a **seed file**, not a runtime config. On the first call to `ensure_standardizer_schema()`, if the `sectionizer_categories` table is empty and `config.json` exists, `_seed_sectionizer_categories()` reads the file's `sections` array and inserts the rows. Once the table has any rows, `config.json` is ignored entirely.
+
+To add or edit categories after initial setup, update the `sectionizer_categories` table directly (via the admin panel or SQL). Changes take effect on the next sectionizer run without any file changes.
+
+The expected shape of `config.json` (if used for seeding) is:
 
 ```json
 {
-  "name": "Engineering",
-  "min_score": 0.25,
-  "rules": [
-    "Prioritize documents about API changes, incidents, release notes, or architecture work.",
-    "Prefer documents whose source clearly belongs to engineering."
+  "sections": [
+    {
+      "name": "Engineering",
+      "objective": "Documents about engineering work",
+      "min_score": 0.25,
+      "rules": [
+        "Prioritize documents about API changes, incidents, release notes, or architecture work.",
+        "Prefer documents whose source clearly belongs to engineering."
+      ]
+    }
   ]
 }
 ```
-
-Rules are plain text instructions for the LLM. They are not parsed as structured predicates. The LLM receives each rule exactly as configured and is expected to score every rule on a `0.0` to `1.0` scale.
 
 ## Prompt Template
 

@@ -1,3 +1,3 @@
-from .agent import standardizer_agent
+from .agent import standardizer_agent as root_agent
 
-__all__ = ["standardizer_agent"]
+__all__ = ["root_agent"]

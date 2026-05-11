@@ -19,7 +19,7 @@ That file contains:
 Code that reads or writes the shared pipeline DB should import from `db.standardizer_db` and use:
 
 - `session_scope()`
-- mapped ORM classes such as `HoarderOutput`, `ScreenedFile`, `Document`, `SectionizerOutput`, `NewsletterRun`
+- mapped ORM classes: `HoarderOutput`, `HoarderSourceRun`, `HoarderSourceArtifact`, `ScreenedFile`, `Document`, `DocumentScreenedFile`, `MediaAsset`, `HoarderOutputMediaAsset`, `SectionizerCategory`, `SectionizerOutput`, `SectionizerOutputDocument`, `NewsletterRun`, `NewsletterRunSectionizerOutput`, `NewsletterRunConfig`, `HomepageItem`
 - `ensure_standardizer_schema()` when explicit bootstrap is needed
 
 Typical pattern:
@@ -60,9 +60,19 @@ Those do not read `data/standardizer.db`; they read `D:/ai/crawl4ai/data/crawler
 - `standardizer.db` is owned by this project, so we keep one shared ORM model layer for it.
 - `crawler.sqlite3` is owned by Crawl4AI, so those readers stay lightweight and isolated.
 
+## Schema Bootstrap Pattern
+
+All table creation, column migrations, trigger creation, and seed data insertion flow through the single function `ensure_standardizer_schema()` in `db/standardizer_db.py`. Individual agent modules contain thin `_ensure_*()` wrapper functions (e.g., `_ensure_sectionizer_schema()` in the sectionizer agent) — these wrappers simply call `ensure_standardizer_schema()` and do not create tables independently.
+
+`session_scope()` calls `ensure_standardizer_schema()` on every invocation, so the schema is always up to date before any DB access.
+
+Seed operations inside `ensure_standardizer_schema()`:
+- `_seed_sectionizer_categories()` — populates `sectionizer_categories` from `agents/sectionizer/config.json` if the table is empty.
+- `_seed_homepage_items()` — populates `homepage_items` from article frontmatter in `newsletter_website/src/content/articles/` if the table is empty.
+
 ## Guidance For Future Changes
 
-- If a new table belongs in `standardizer.db`, add its model to [db/standardizer_db.py](/d:/ai/newsletter_adk/db/standardizer_db.py).
+- If a new table belongs in `standardizer.db`, add its ORM model to [db/standardizer_db.py](/d:/ai/newsletter_adk/db/standardizer_db.py) and call `_ensure_column()` or add a seed step inside `ensure_standardizer_schema()`.
 - Prefer reusing existing mapped models instead of writing raw SQL in agents or the dashboard.
-- Use raw SQL only when the query is genuinely easier as SQL, such as a complex CTE or window-function query. Even then, run it through the shared SQLAlchemy session.
-- Do not add new ad hoc schema creation code in individual modules if it can live in `ensure_standardizer_schema()`.
+- Use raw SQL only when the query is genuinely easier as SQL, such as a complex CTE or window-function query. Even then, run it through the shared SQLAlchemy `session_scope()`.
+- Do not add new schema creation code in individual agent modules — it belongs in `ensure_standardizer_schema()`.
