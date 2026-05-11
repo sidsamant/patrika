@@ -1,3 +1,3 @@
-from .agent import sectionizer_agent
+from .agent import sectionizer_agent as root_agent
 
-__all__ = ["sectionizer_agent"]
+__all__ = ["root_agent"]

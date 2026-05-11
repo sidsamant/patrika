@@ -4,6 +4,8 @@ import argparse
 import asyncio
 from datetime import datetime
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -49,6 +51,13 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 load_dotenv(PROJECT_ROOT / ".env")
+
+_SENTINELPRESS_ROOT = str(PROJECT_ROOT.parent / "sentinelpress")
+if _SENTINELPRESS_ROOT not in sys.path:
+    sys.path.insert(0, _SENTINELPRESS_ROOT)
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sentinelpress.settings")
+import django
+django.setup()
 
 from agents.screener.agent_hosted import file_metadata_screening_agent
 from agents.standardizer.agent import standardizer_agent

@@ -12,7 +12,7 @@ from google.adk.events import Event
 from google.genai import types
 
 from ...config import SourceConfig
-from ...storage import load_processed_hoarder_artifact_paths, record_hoarder_source_artifact
+from ...storage import load_processed_hoarder_artifact_paths, record_hoarder_source_artifact, record_hoarder_source_run
 from ..common import merge_file_list
 
 logger = logging.getLogger(__name__)
@@ -172,6 +172,12 @@ class WebSourceHoarderAgent(BaseAgent):
         logger.debug("Running websource hoarder for source_id=%s db=%s", self._source.id, db_path)
 
         if not db_path.exists() or not db_path.is_file():
+            record_hoarder_source_run(
+                source_id=self._source.id,
+                source_path=str(db_path),
+                status="error",
+                error_text=f"Crawl4AI database not found: {db_path}",
+            )
             raise FileNotFoundError(f"WebSource Crawl4AI database not found: {db_path}")
 
         collected_items: list[dict[str, object]] = []
@@ -199,6 +205,13 @@ class WebSourceHoarderAgent(BaseAgent):
                     error_text=str(error),
                 )
                 logger.exception("WebSource failed reading scraped_item id=%s", scraped_item_id)
+
+        record_hoarder_source_run(
+            source_id=self._source.id,
+            source_path=str(db_path),
+            status="success",
+            item_count=len(collected_items),
+        )
 
         merged_items = merge_file_list(ctx.session.state.get("file_list"), collected_items)
         ctx.session.state["file_list"] = json.dumps(merged_items)

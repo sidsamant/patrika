@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -13,6 +14,13 @@ from google.genai import types
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(PROJECT_ROOT / ".env")
+
+_SENTINELPRESS_ROOT = str(PROJECT_ROOT.parent / "sentinelpress")
+if _SENTINELPRESS_ROOT not in sys.path:
+    sys.path.insert(0, _SENTINELPRESS_ROOT)
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sentinelpress.settings")
+import django
+django.setup()
 
 APP_NAME = "newsletter_adk"
 USER_ID = "local_user"

@@ -11,8 +11,8 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
 
-from ..hoarder.storage import load_hoarder_rows_for_screening, mark_hoarder_rows_screened
-from .storage import DB_PATH, parse_screened_payload, persist_screened_payload
+from hoarder.storage import load_hoarder_rows_for_screening, mark_hoarder_rows_screened
+from .storage import parse_screened_payload, persist_screened_payload
 from .util import reviewer_instruction_provider, simple_before_model_modifier
 
 LLM_REQUEST_DELAY_SECONDS = max(float(os.getenv("SCREENER_LLM_DELAY_SECONDS", "2.0")), 0.0)
@@ -118,7 +118,7 @@ class FileMetadataScreeningAgent(BaseAgent):
             empty_payload = {"files": []}
             ctx.session.state["screened_file_list"] = json.dumps(empty_payload)
             persisted_count = persist_screened_payload(empty_payload)
-            logger.debug("Persisted %d hosted screener rows to %s", persisted_count, DB_PATH)
+            logger.debug("Persisted %d hosted screener rows to %s", persisted_count, "pipeline API")
             yield Event(
                 author=self.name,
                 invocation_id=ctx.invocation_id,
@@ -135,7 +135,7 @@ class FileMetadataScreeningAgent(BaseAgent):
             logger.debug(
                 "No LLM-screened items required; auto-persisted %d passthrough hosted screener rows to %s",
                 persisted_count,
-                DB_PATH,
+                "pipeline API",
             )
             yield Event(
                 author=self.name,
@@ -178,7 +178,7 @@ class FileMetadataScreeningAgent(BaseAgent):
                 len(llm_screened_items),
                 len(passthrough_screened_items),
                 persisted_count,
-                DB_PATH,
+                "pipeline API",
             )
             yield Event(
                 author=self.name,

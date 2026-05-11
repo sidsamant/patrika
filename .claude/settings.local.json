@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.crawl4ai.com)",
+      "Bash(python _fix_encoding.py)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"from src.scrapers.base import BaseScraper, PROJECT_ROOT; print\\('PROJECT_ROOT:', PROJECT_ROOT\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/scrapers/digantara_newsroom.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/celery -A sentinelpress inspect ping --timeout 2)",
+      "Bash(git commit -m ' *)",
+      "Bash(.venv/Scripts/pip show *)",
+      "Bash(redis-cli --version)",
+      "Bash(redis-server --version)",
+      "Bash(Get-Command redis-server *)",
+      "Bash(Select-Object -ExpandProperty Source)",
+      "Bash(where.exe redis-server *)",
+      "PowerShell(Get-Command redis-server -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Process -Name \"redis-server\" -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-ChildItem \"C:\\\\Program Files\\\\Redis\", \"C:\\\\Redis\", \"$env:LOCALAPPDATA\\\\Redis\" -ErrorAction SilentlyContinue | Select-Object FullName)",
+      "Bash(.venv/Scripts/python -c \"import google.adk; print\\('OK:', google.adk.__file__\\)\")",
+      "Bash(python -c \"import google.adk; print\\(google.adk.__file__\\)\")",
+      "Bash(xargs grep *)",
+      "Bash(python manage.py showmigrations pipeline)",
+      "Bash(python -c \"import pipeline_client; print\\('pipeline_client OK'\\)\")",
+      "Bash(d:/ai/sentinelpress/.venv/Scripts/python manage.py showmigrations pipeline)",
+      "Read(//d/ai/**)",
+      "Bash(python3 -c \"import pipeline_client; print\\(pipeline_client.__file__\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(.venv/Scripts/python.exe -c \"import django; import os; os.environ['DJANGO_SETTINGS_MODULE']='sentinelpress.settings'; django.setup\\(\\); from sectionizer import views; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(../.venv/Scripts/pip show *)",
+      "Bash(d:/ai/newsletter_adk/.venv/Scripts/pip show *)",
+      "Bash(d:/ai/newsletter_adk/.venv/Scripts/pip install *)",
+      "Bash(d:/ai/newsletter_adk/.venv/Scripts/python manage.py migrate)"
+    ]
+  }
+}

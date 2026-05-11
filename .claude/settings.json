@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(pip show *)",
+      "WebFetch(domain:www.satsure.co)",
+      "Bash(.venv/Scripts/python.exe -c ' *)"
+    ]
+  }
+}

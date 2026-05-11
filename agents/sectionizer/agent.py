@@ -17,23 +17,14 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.adk.models import LlmRequest, LlmResponse
 from google.genai import types
-from sqlalchemy import text
 
-from db.standardizer_db import (
-    SectionizerCategory,
-    SectionizerOutput,
-    SectionizerOutputDocument,
-    ensure_standardizer_schema,
-    session_scope,
-)
+import pipeline_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_DIR = PROJECT_ROOT / ".logs"
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 SECTIONIZER_LOG_PATH = LOGS_DIR / f"sectionizer-{RUN_TIMESTAMP}.debug.log"
-STANDARDIZER_DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
-CONFIG_PATH = Path(__file__).with_name("config.json")
 PROMPT_TEMPLATE_PATH = Path(__file__).with_name("prompt_template.md")
 
 load_dotenv(ENV_PATH)
@@ -42,7 +33,6 @@ LLM_REQUEST_DELAY_SECONDS = max(float(os.getenv("SECTIONIZER_LLM_DELAY_SECONDS",
 
 
 def _configure_logging() -> logging.Logger:
-    """Attach console and file handlers for sectionizer debug logs."""
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
@@ -71,14 +61,12 @@ logger = _configure_logging()
 
 
 def _mask_secret(value: str, *, visible: int = 4) -> str:
-    """Return a masked representation of a secret for debug logging."""
     if len(value) <= visible * 2:
         return "*" * len(value)
     return f"{value[:visible]}...{value[-visible:]}"
 
 
 def _get_llm_token_display() -> str:
-    """Return a safe summary of the configured LLM credential."""
     for env_name in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GENAI_API_KEY"):
         token = os.getenv(env_name)
         if token:
@@ -88,7 +76,6 @@ def _get_llm_token_display() -> str:
 
 @lru_cache(maxsize=1)
 def _get_genai_client() -> genai.Client:
-    """Create a Gemini client using the configured API credentials."""
     for env_name in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GENAI_API_KEY"):
         api_key = os.getenv(env_name)
         if api_key:
@@ -97,7 +84,6 @@ def _get_genai_client() -> genai.Client:
 
 
 def _count_token_parts(runtime_instruction: str, llm_request: LlmRequest) -> tuple[int | None, int | None, int | None]:
-    """Count prompt tokens for the upcoming Gemini request using Gemini API-supported inputs."""
     model_name = llm_request.model or os.getenv("SECTIONIZER_GEMINI_MODEL", "gemini-2.5-flash-lite")
     try:
         instruction_response = _get_genai_client().models.count_tokens(
@@ -129,7 +115,6 @@ def _count_token_parts(runtime_instruction: str, llm_request: LlmRequest) -> tup
 
 
 def _state_get(context: Any, key: str) -> Any:
-    """Read a state value from either a readonly context or an invocation context."""
     state = getattr(context, "state", None)
     if state is not None:
         getter = getattr(state, "get", None)
@@ -145,7 +130,6 @@ def _state_get(context: Any, key: str) -> Any:
 
 
 def _read_text_if_exists(path: Path) -> str | None:
-    """Return stripped file contents when `path` exists, otherwise `None`."""
     try:
         if path.exists() and path.is_file():
             content = path.read_text(encoding="utf-8").strip()
@@ -157,122 +141,21 @@ def _read_text_if_exists(path: Path) -> str | None:
 
 
 def _utc_now_iso() -> str:
-    """Return the current UTC timestamp in ISO 8601 format."""
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
-def _ensure_sectionizer_schema(connection: object | None = None) -> None:
-    """Ensure the sectionizer run history tables exist in the standardizer DB."""
-    del connection
-    ensure_standardizer_schema()
-
-
-def _persist_row_output(
-    *,
-    session: Any,
-    row: dict[str, Any],
-    row_output_payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Insert one sectionizer output row into SQLite without replacing prior runs."""
-    _ensure_sectionizer_schema()
-
-    created_at = _utc_now_iso()
-    run_timestamp = RUN_TIMESTAMP
-    source_path = str(row_output_payload.get("source_path") or "").strip() or None
-    match_count = len(row_output_payload.get("matches") or []) if isinstance(row_output_payload.get("matches"), list) else 0
-    category_id = row_output_payload.get("category_id")
-    llm_instruction = str(row_output_payload.get("llm_instruction") or "").strip() or None
-    llm_content = str(row_output_payload.get("llm_content") or "").strip() or None
-    record = SectionizerOutput(
-        doc_id=row.get("doc_id"),
-        category_id=category_id if isinstance(category_id, int) else None,
-        output_path="",
-        source_path=source_path,
-        llm_instruction=llm_instruction,
-        llm_content=llm_content,
-        output_json=json.dumps(row_output_payload, ensure_ascii=True, default=str),
-        match_count=match_count,
-        run_timestamp=run_timestamp,
-        created_at=created_at,
-    )
-    session.add(record)
-    session.flush()
-    sectionizer_output_id = int(record.sectionizer_output_id)
-    session.add(
-        SectionizerOutputDocument(
-            sectionizer_output_id=sectionizer_output_id,
-            doc_id=row.get("doc_id"),
-            created_at=created_at,
-        )
-    )
-
-    return {
-        "sectionizer_output_id": sectionizer_output_id,
-        "doc_id": row.get("doc_id"),
-        "category_id": category_id if isinstance(category_id, int) else None,
-        "source_path": source_path,
-        "llm_instruction": llm_instruction,
-        "llm_content": llm_content,
-        "output_json": row_output_payload,
-        "match_count": match_count,
-        "run_timestamp": run_timestamp,
-        "created_at": created_at,
-    }
-
-
-def _parse_json_object(raw_text: str | None) -> dict[str, Any]:
-    """Parse a JSON object string into a dictionary, falling back to `{}`."""
-    if not raw_text:
-        return {}
-    try:
-        value = json.loads(raw_text)
-    except json.JSONDecodeError:
-        logger.debug("Ignoring invalid JSON object payload.")
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 def _load_categories_from_db() -> list[dict[str, Any]]:
-    """Load sectionizer categories from SQLite, using the JSON file only as DB bootstrap input."""
-    _ensure_sectionizer_schema()
+    """Load sectionizer categories from the pipeline API (pipeline.sectionizer_categories table)."""
     try:
-        with session_scope() as session:
-            records = (
-                session.query(SectionizerCategory)
-                .order_by(SectionizerCategory.sectionizer_category_id.asc())
-                .all()
-            )
+        categories = pipeline_client.load_sectionizer_categories()
+        logger.debug("Loaded %d sectionizer categories from pipeline API", len(categories))
+        return categories
     except Exception:
-        logger.exception("Failed loading sectionizer categories from %s", STANDARDIZER_DB_PATH)
+        logger.exception("Failed loading sectionizer categories from pipeline API")
         return []
-
-    categories: list[dict[str, Any]] = []
-    for record in records:
-        try:
-            rules = json.loads(record.rules)
-        except json.JSONDecodeError:
-            rules = []
-
-        categories.append(
-            {
-                "sectionizer_category_id": int(record.sectionizer_category_id),
-                "name": str(record.name).strip(),
-                "objective": str(record.objective).strip() if isinstance(record.objective, str) and record.objective.strip() else None,
-                "min_score": float(record.min_score),
-                "rules": rules if isinstance(rules, list) else [],
-            }
-        )
-
-    logger.debug(
-        "Loaded %d sectionizer categories from sqlite.sectionizer_categories (bootstrap source=%s)",
-        len(categories),
-        CONFIG_PATH,
-    )
-    return categories
 
 
 def _load_prompt_template() -> str:
-    """Load the external prompt template used for Gemini requests."""
     template = _read_text_if_exists(PROMPT_TEMPLATE_PATH)
     if template:
         return template
@@ -281,103 +164,23 @@ def _load_prompt_template() -> str:
 
 def _load_rows_from_db() -> list[dict[str, Any]]:
     """Load the latest unsectionized standardized rows, deduped by source path."""
-    if not STANDARDIZER_DB_PATH.exists():
-        logger.debug("Standardizer database not found at %s", STANDARDIZER_DB_PATH)
-        return []
     try:
-        with session_scope() as session:
-            records = session.execute(
-                text(
-                    """
-                    WITH ranked_documents AS (
-                      SELECT
-                        d.doc_id,
-                        d.source_path,
-                        d.author,
-                        d.text_content,
-                        d.metadata_json,
-                        d.extraction_status,
-                        d.extraction_error,
-                        d.content_sha256,
-                        d.modified_at,
-                        d.created_at,
-                        d.persisted_at,
-                        ROW_NUMBER() OVER (
-                          PARTITION BY COALESCE(NULLIF(LOWER(TRIM(d.source_path)), ''), 'doc:' || CAST(d.doc_id AS TEXT))
-                          ORDER BY d.doc_id DESC
-                        ) AS source_rank
-                      FROM documents d
-                      WHERE d.text_content IS NOT NULL
-                        AND TRIM(d.text_content) <> ''
-                        AND NOT EXISTS (
-                          SELECT 1
-                          FROM sectionizer_outputs so
-                          WHERE so.doc_id = d.doc_id
-                        )
-                    )
-                    SELECT
-                      doc_id,
-                      source_path,
-                      author,
-                      text_content,
-                      metadata_json,
-                      extraction_status,
-                      extraction_error,
-                      content_sha256,
-                      modified_at,
-                      created_at,
-                      persisted_at
-                    FROM ranked_documents
-                    WHERE source_rank = 1
-                    ORDER BY doc_id ASC
-                    """
-                )
-            ).all()
-            rows: list[dict[str, Any]] = []
-            for record in records:
-                metadata_raw = record[4]
-                metadata: dict[str, Any] = {}
-                if isinstance(metadata_raw, str) and metadata_raw.strip():
-                    try:
-                        loaded = json.loads(metadata_raw)
-                        if isinstance(loaded, dict):
-                            metadata = loaded
-                    except json.JSONDecodeError:
-                        metadata = {}
-                rows.append(
-                    {
-                        "doc_id": record[0],
-                        "source_path": record[1],
-                        "author": record[2],
-                        "text": record[3],
-                        "metadata": metadata,
-                        "extraction": {
-                            "status": record[5],
-                            "error": record[6],
-                        },
-                        "content_sha256": record[7],
-                        "modified_at": record[8],
-                        "created_at": record[9],
-                        "persisted_at": record[10],
-                    }
-                )
-            logger.debug("Loaded %d deduped unprocessed standardized rows from %s", len(rows), STANDARDIZER_DB_PATH)
-            return rows
+        rows = pipeline_client.load_documents_for_sectionizing()
+        logger.debug("Loaded %d deduped unprocessed standardized rows from API", len(rows))
+        return rows
     except Exception:
-        logger.exception("Failed loading standardized rows from %s", STANDARDIZER_DB_PATH)
+        logger.exception("Failed loading standardized rows from API")
         return []
 
 
 def _load_standardized_rows(ctx: InvocationContext) -> tuple[list[dict[str, Any]], str]:
-    """Resolve standardized rows from the SQLite database only."""
     from_db = _load_rows_from_db()
     if from_db:
-        return from_db, str(STANDARDIZER_DB_PATH)
+        return from_db, "postgresql.documents"
     return [], "none"
 
 
 def _normalize_plaintext_rules(raw_rules: Any) -> list[dict[str, Any]]:
-    """Normalize config rules into plain-text rule definitions for prompt/rendering."""
     normalized: list[dict[str, Any]] = []
     if isinstance(raw_rules, str):
         raw_items = [raw_rules]
@@ -405,7 +208,6 @@ def _normalize_plaintext_rules(raw_rules: Any) -> list[dict[str, Any]]:
 
 
 def _normalize_section_definition(raw_section: Any) -> dict[str, Any] | None:
-    """Normalize one configured section while preserving plain-text rules for the LLM."""
     if not isinstance(raw_section, dict):
         return None
 
@@ -426,7 +228,6 @@ def _normalize_section_definition(raw_section: Any) -> dict[str, Any] | None:
 
 
 def _normalize_section_definitions(raw_sections: Any) -> list[dict[str, Any]]:
-    """Normalize configured sections for downstream prompt rendering and scoring."""
     if not isinstance(raw_sections, list):
         return []
     normalized: list[dict[str, Any]] = []
@@ -438,7 +239,6 @@ def _normalize_section_definitions(raw_sections: Any) -> list[dict[str, Any]]:
 
 
 def _path_get(payload: dict[str, Any], dotted_path: str) -> Any:
-    """Read a nested value from dictionaries/lists using dot-separated path syntax."""
     current: Any = payload
     for part in dotted_path.split("."):
         if isinstance(current, dict):
@@ -461,7 +261,6 @@ def _render_prompt(
     *,
     section_defs: list[dict[str, Any]],
 ) -> str:
-    """Fill the static prompt template with the configured section definitions."""
     rendered = template
     replacements = {
         "{{SECTIONS_JSON}}": json.dumps(section_defs, indent=2, ensure_ascii=True, default=str),
@@ -472,7 +271,6 @@ def _render_prompt(
 
 
 def _render_document_payload(row: dict[str, Any]) -> str:
-    """Render the document-specific user message sent alongside the static instruction."""
     return (
         "Evaluate the current standardized document and return JSON only.\n\n"
         "Document metadata:\n"
@@ -483,7 +281,6 @@ def _render_document_payload(row: dict[str, Any]) -> str:
 
 
 def _build_static_instruction(section_defs: list[dict[str, Any]]) -> str:
-    """Build the stable LLM instruction from the external prompt template and section config."""
     return _render_prompt(
         _load_prompt_template(),
         section_defs=[item for item in section_defs if isinstance(item, dict)],
@@ -493,7 +290,6 @@ def _build_static_instruction(section_defs: list[dict[str, Any]]) -> str:
 async def sectionizer_before_model_callback(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> LlmResponse | None:
-    """Log the static instruction and per-document request payload before the ADK LLM call."""
     row = _state_get(callback_context, "sectionizer_current_row")
     if not isinstance(row, dict):
         row = {}
@@ -521,7 +317,6 @@ async def sectionizer_before_model_callback(
 
 
 def _extract_json_object(raw_text: str) -> dict[str, Any]:
-    """Parse a JSON object from Gemini output, tolerating fenced or prefixed text."""
     stripped = raw_text.strip()
     candidates = [stripped]
 
@@ -549,7 +344,6 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
 
 
 def _to_score(value: Any) -> float:
-    """Clamp any numeric-like value into the 0..1 range used by section scoring."""
     try:
         score = float(value)
     except (TypeError, ValueError):
@@ -558,7 +352,6 @@ def _to_score(value: Any) -> float:
 
 
 def _to_string_list(value: Any) -> list[str]:
-    """Convert a JSON value into a list of non-empty strings."""
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, str) and value.strip():
@@ -567,12 +360,10 @@ def _to_string_list(value: Any) -> list[str]:
 
 
 def _section_key(value: Any) -> str:
-    """Normalize section names for stable matching between config and Gemini output."""
     return str(value or "").strip().lower()
 
 
 def _normalize_rule_scores(raw_section: dict[str, Any], section_def: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
-    """Merge Gemini rule scores with plain-text config rules and compute the final score."""
     raw_rule_scores = raw_section.get("rule_scores")
     if not isinstance(raw_rule_scores, list):
         raw_rule_scores = []
@@ -609,7 +400,6 @@ def _normalize_rule_scores(raw_section: dict[str, Any], section_def: dict[str, A
 
 
 def _normalize_section_result(section_def: dict[str, Any], raw_section: dict[str, Any] | None) -> dict[str, Any]:
-    """Convert one raw Gemini section evaluation into the persisted output schema."""
     raw_section = raw_section or {}
     normalized_rule_scores, computed_score = _normalize_rule_scores(raw_section, section_def)
     min_score = _to_score(section_def.get("min_score"))
@@ -634,7 +424,6 @@ def _normalize_section_result(section_def: dict[str, Any], raw_section: dict[str
 
 
 def _normalize_llm_result(section_defs: list[dict[str, Any]], raw_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    """Normalize the full Gemini payload into all evaluations, passing matches, and a doc summary."""
     raw_sections = raw_payload.get("sections") or raw_payload.get("segments")
     raw_sections_by_name = {
         _section_key(item.get("section") or item.get("section_name") or item.get("segment") or item.get("name")): item
@@ -654,7 +443,6 @@ def _normalize_llm_result(section_defs: list[dict[str, Any]], raw_payload: dict[
 
 
 def _pick_primary_match(matches: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Return the highest-scoring passing match for DB association."""
     if not matches:
         return None
     first_match = matches[0]
@@ -662,7 +450,6 @@ def _pick_primary_match(matches: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _content_to_text(content: types.Content | None) -> str:
-    """Flatten ADK content parts into a single debug-friendly text string."""
     if content is None:
         return ""
 
@@ -673,11 +460,48 @@ def _content_to_text(content: types.Content | None) -> str:
     return "".join((getattr(part, "text", "") or "") for part in parts).strip()
 
 
+def _persist_row_output(
+    *,
+    row: dict[str, Any],
+    row_output_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Insert one sectionizer output row via API."""
+    source_path = str(row_output_payload.get("source_path") or "").strip() or None
+    match_count = len(row_output_payload.get("matches") or []) if isinstance(row_output_payload.get("matches"), list) else 0
+    category_id = row_output_payload.get("category_id")
+    llm_instruction = str(row_output_payload.get("llm_instruction") or "").strip() or None
+    llm_content = str(row_output_payload.get("llm_content") or "").strip() or None
+
+    result = pipeline_client.create_sectionizer_output(
+        doc_id=row.get("doc_id"),
+        category_id=category_id if isinstance(category_id, int) else None,
+        source_path=source_path,
+        llm_instruction=llm_instruction,
+        llm_content=llm_content,
+        output_json=row_output_payload,
+        match_count=match_count,
+        run_timestamp=RUN_TIMESTAMP,
+    )
+    sectionizer_output_id = int(result.get("sectionizer_output_id") or 0)
+
+    return {
+        "sectionizer_output_id": sectionizer_output_id,
+        "doc_id": row.get("doc_id"),
+        "category_id": category_id if isinstance(category_id, int) else None,
+        "source_path": source_path,
+        "llm_instruction": llm_instruction,
+        "llm_content": llm_content,
+        "output_json": row_output_payload,
+        "match_count": match_count,
+        "run_timestamp": RUN_TIMESTAMP,
+        "created_at": result.get("created_at"),
+    }
+
+
 class SectionizerAgent(BaseAgent):
     """ADK-backed Gemini agent that evaluates documents against configured newsletter sections."""
 
     def __init__(self) -> None:
-        """Initialize the sectionizer agent and its internal ADK LLM reviewer."""
         section_defs = _normalize_section_definitions(_load_categories_from_db())
         static_instruction = _build_static_instruction(section_defs)
 
@@ -714,82 +538,77 @@ class SectionizerAgent(BaseAgent):
         logger.debug("Sectionizer row source: %s (%d rows)", row_source, len(standardized_rows))
 
         persisted_outputs: list[dict[str, Any]] = []
-        with session_scope() as session:
-            _ensure_sectionizer_schema()
 
-            for row_index, row in enumerate(standardized_rows):
-                if row_index > 0 and LLM_REQUEST_DELAY_SECONDS > 0:
-                    logger.debug("Sleeping %.2f seconds before next sectionizer LLM call.", LLM_REQUEST_DELAY_SECONDS)
-                    await asyncio.sleep(LLM_REQUEST_DELAY_SECONDS)
+        for row_index, row in enumerate(standardized_rows):
+            if row_index > 0 and LLM_REQUEST_DELAY_SECONDS > 0:
+                logger.debug("Sleeping %.2f seconds before next sectionizer LLM call.", LLM_REQUEST_DELAY_SECONDS)
+                await asyncio.sleep(LLM_REQUEST_DELAY_SECONDS)
 
-                ctx.session.state["sectionizer_current_row"] = row
-                ctx.session.state["sectionizer_section_defs"] = section_defs
+            ctx.session.state["sectionizer_current_row"] = row
+            ctx.session.state["sectionizer_section_defs"] = section_defs
 
-                raw_response = ""
-                async for event in self._reviewer.run_async(ctx):
-                    content = getattr(event, "content", None)
-                    parts = getattr(content, "parts", None) if content else None
-                    if isinstance(parts, list):
-                        text = "".join((getattr(part, "text", "") or "") for part in parts).strip()
-                        if text:
-                            raw_response = text
+            raw_response = ""
+            async for event in self._reviewer.run_async(ctx):
+                content = getattr(event, "content", None)
+                parts = getattr(content, "parts", None) if content else None
+                if isinstance(parts, list):
+                    text = "".join((getattr(part, "text", "") or "") for part in parts).strip()
+                    if text:
+                        raw_response = text
 
-                if raw_response:
-                    logger.debug("Sectionizer raw Gemini response:\n%s", raw_response)
+            if raw_response:
+                logger.debug("Sectionizer raw Gemini response:\n%s", raw_response)
 
-                llm_instruction = str(ctx.session.state.get("sectionizer_runtime_instruction") or "").strip()
-                llm_content = str(ctx.session.state.get("sectionizer_runtime_document_payload") or "").strip()
-                raw_payload = _extract_json_object(raw_response)
-                evaluations, matches, document_summary = _normalize_llm_result(section_defs, raw_payload)
-                primary_match = _pick_primary_match(matches)
-                primary_category_id = primary_match.get("category_id") if isinstance(primary_match, dict) else None
-                row_output_payload = {
-                    "rowSource": row_source,
-                    "sectionConfigSource": "sqlite.sectionizer_categories",
-                    "sectionConfigBootstrapPath": str(CONFIG_PATH),
-                    "promptTemplatePath": str(PROMPT_TEMPLATE_PATH),
-                    "runTimestamp": RUN_TIMESTAMP,
-                    "doc_id": row.get("doc_id"),
-                    "category_id": primary_category_id if isinstance(primary_category_id, int) else None,
-                    "category_name": primary_match.get("section") if isinstance(primary_match, dict) else None,
-                    "source_path": _path_get(row, "metadata.filesystem.path")
-                    or _path_get(row, "metadata.source.path"),
-                    "llm_instruction": llm_instruction,
-                    "llm_content": llm_content,
-                    "document_summary": document_summary,
-                    "section_evaluations": evaluations,
-                    "matches": matches,
+            llm_instruction = str(ctx.session.state.get("sectionizer_runtime_instruction") or "").strip()
+            llm_content = str(ctx.session.state.get("sectionizer_runtime_document_payload") or "").strip()
+            raw_payload = _extract_json_object(raw_response)
+            evaluations, matches, document_summary = _normalize_llm_result(section_defs, raw_payload)
+            primary_match = _pick_primary_match(matches)
+            primary_category_id = primary_match.get("category_id") if isinstance(primary_match, dict) else None
+            row_output_payload = {
+                "rowSource": row_source,
+                "sectionConfigSource": "postgresql.sectionizer_categories",
+                "promptTemplatePath": str(PROMPT_TEMPLATE_PATH),
+                "runTimestamp": RUN_TIMESTAMP,
+                "doc_id": row.get("doc_id"),
+                "category_id": primary_category_id if isinstance(primary_category_id, int) else None,
+                "category_name": primary_match.get("section") if isinstance(primary_match, dict) else None,
+                "source_path": _path_get(row, "metadata.filesystem.path")
+                or _path_get(row, "metadata.source.path"),
+                "llm_instruction": llm_instruction,
+                "llm_content": llm_content,
+                "document_summary": document_summary,
+                "section_evaluations": evaluations,
+                "matches": matches,
+            }
+            persisted_record = _persist_row_output(
+                row=row,
+                row_output_payload=row_output_payload,
+            )
+            persisted_outputs.append(
+                {
+                    **persisted_record,
+                    "match_count": len(matches),
+                    "output": row_output_payload,
                 }
-                persisted_record = _persist_row_output(
-                    session=session,
-                    row=row,
-                    row_output_payload=row_output_payload,
-                )
-                persisted_outputs.append(
-                    {
-                        **persisted_record,
-                        "match_count": len(matches),
-                        "output": row_output_payload,
-                    }
-                )
-                logger.debug(
-                    "Row %s produced %d passing sections out of %d evaluations and was inserted into sectionizer_outputs with id=%s.",
-                    row.get("doc_id"),
-                    len(matches),
-                    len(evaluations),
-                    persisted_record["sectionizer_output_id"],
-                )
+            )
+            logger.debug(
+                "Row %s produced %d passing sections out of %d evaluations and was inserted into sectionizer_outputs with id=%s.",
+                row.get("doc_id"),
+                len(matches),
+                len(evaluations),
+                persisted_record["sectionizer_output_id"],
+            )
 
         matched_rows = sum(1 for item in persisted_outputs if item.get("match_count"))
         output_payload = {
             "rowSource": row_source,
-            "sectionConfigSource": "sqlite.sectionizer_categories",
-            "sectionConfigBootstrapPath": str(CONFIG_PATH),
+            "sectionConfigSource": "postgresql.sectionizer_categories",
             "promptTemplatePath": str(PROMPT_TEMPLATE_PATH),
             "runTimestamp": RUN_TIMESTAMP,
             "totalRows": len(standardized_rows),
             "matchedRows": matched_rows,
-            "storage": "sqlite.sectionizer_outputs",
+            "storage": "postgresql.sectionizer_outputs",
             "outputs": persisted_outputs,
         }
         ctx.session.state["section_mappings"] = json.dumps(output_payload)

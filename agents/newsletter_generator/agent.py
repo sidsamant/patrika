@@ -12,20 +12,12 @@ from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
-from sqlalchemy import select, text
 
-from db.standardizer_db import (
-    MediaAsset,
-    NewsletterRun,
-    NewsletterRunSectionizerOutput,
-    ensure_standardizer_schema,
-    session_scope,
-)
+import pipeline_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = PROJECT_ROOT / ".output"
 NEWSLETTER_OUTPUT_DIR = OUTPUT_DIR / "newsletter"
-STANDARDIZER_DB_PATH = PROJECT_ROOT / "data" / "standardizer.db"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 HTML_TEMPLATE_NAME = "mobile_newsletter.html.j2"
 NEWSLETTER_TITLE = "Gagan Gaze"
@@ -33,17 +25,14 @@ NEWSLETTER_SLOGAN = "India for Space"
 
 
 def _utc_now() -> datetime:
-    """Return the current UTC datetime."""
     return datetime.now(timezone.utc)
 
 
 def _utc_now_iso() -> str:
-    """Return the current UTC timestamp in ISO 8601 format."""
     return _utc_now().isoformat()
 
 
 def _parse_run_date(run_timestamp: str | None) -> date:
-    """Parse a run timestamp into a date for display and file naming."""
     value = str(run_timestamp or "").strip()
     if not value:
         return _utc_now().date()
@@ -60,120 +49,36 @@ def _parse_run_date(run_timestamp: str | None) -> date:
 
 
 def _format_indian_date(value: date) -> str:
-    """Format a date in Indian dd/mm/yyyy style."""
     return value.strftime("%d/%m/%Y")
 
 
 def _format_filename_date(value: date) -> str:
-    """Format a date for newsletter filenames."""
     return value.strftime("%Y-%m-%d")
 
 
-def _ensure_newsletter_schema(connection: object | None = None) -> None:
-    """Ensure newsletter run tables exist in the shared SQLite database."""
-    del connection
-    ensure_standardizer_schema()
-
-
 def _load_sectionizer_outputs() -> tuple[str | None, list[dict[str, Any]]]:
-    """Load deduped unreferenced sectionizer rows from the shared DB."""
-    if not STANDARDIZER_DB_PATH.exists():
+    """Load deduped unreferenced sectionizer rows from the API."""
+    try:
+        return pipeline_client.load_sectionizer_outputs_for_newsletter()
+    except Exception:
         return None, []
-
-    with session_scope() as session:
-        _ensure_newsletter_schema()
-        records = session.execute(
-            text(
-                """
-                WITH ranked_sectionizer_outputs AS (
-                  SELECT
-                    so.sectionizer_output_id,
-                    so.doc_id,
-                    so.source_path,
-                    so.output_json,
-                    so.run_timestamp,
-                    so.created_at,
-                    ROW_NUMBER() OVER (
-                      PARTITION BY COALESCE(NULLIF(LOWER(TRIM(so.source_path)), ''), 'doc:' || CAST(so.doc_id AS TEXT))
-                      ORDER BY so.sectionizer_output_id DESC
-                    ) AS source_rank
-                  FROM sectionizer_outputs so
-                  WHERE COALESCE(so.match_count, 0) > 0
-                    AND NOT EXISTS (
-                      SELECT 1
-                      FROM newsletter_run_sectionizer_outputs nrso
-                      WHERE nrso.sectionizer_output_id = so.sectionizer_output_id
-                    )
-                )
-                SELECT
-                  sectionizer_output_id,
-                  doc_id,
-                  source_path,
-                  output_json,
-                  run_timestamp,
-                  created_at
-                FROM ranked_sectionizer_outputs
-                WHERE source_rank = 1
-                ORDER BY sectionizer_output_id ASC
-                """
-            )
-        ).all()
-
-        rows: list[dict[str, Any]] = []
-        for record in records:
-            payload_raw = record[3]
-            payload: dict[str, Any] = {}
-            if isinstance(payload_raw, str) and payload_raw.strip():
-                try:
-                    loaded = json.loads(payload_raw)
-                    if isinstance(loaded, dict):
-                        payload = loaded
-                except json.JSONDecodeError:
-                    payload = {}
-            if not payload:
-                continue
-            payload["_sectionizer_output_id"] = int(record[0])
-            payload["_sectionizer_created_at"] = record[5]
-            rows.append(payload)
-
-        if not rows:
-            return None, []
-
-        latest_run_timestamp = max(str(item.get("runTimestamp") or item.get("run_timestamp") or "") for item in rows)
-        return latest_run_timestamp or None, rows
 
 
 def _load_media_assets() -> dict[int, list[dict[str, str]]]:
     """Load persisted media assets keyed by document id."""
-    if not STANDARDIZER_DB_PATH.exists():
+    try:
+        return pipeline_client.load_media_assets()
+    except Exception:
         return {}
-
-    results: dict[int, list[dict[str, str]]] = defaultdict(list)
-    with session_scope() as session:
-        rows = session.execute(select(MediaAsset).order_by(MediaAsset.media_id.asc())).scalars().all()
-        for row in rows:
-            try:
-                normalized_doc_id = int(row.doc_id)
-            except (TypeError, ValueError):
-                continue
-            results[normalized_doc_id].append(
-                {
-                    "artifact_path": str(row.artifact_path or "").strip(),
-                    "mime_type": str(row.mime_type or "").strip(),
-                }
-            )
-    return results
 
 
 def _is_image_asset(asset: dict[str, str]) -> bool:
-    """Return whether a media asset looks like an image."""
     mime_type = str(asset.get("mime_type") or "").lower()
     artifact_path = str(asset.get("artifact_path") or "").lower()
     return mime_type.startswith("image/") or artifact_path.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
 
 
 def _pick_primary_image(doc_id: Any, media_assets: dict[int, list[dict[str, str]]]) -> str | None:
-    """Pick the first image asset for a standardized document."""
     try:
         normalized_doc_id = int(doc_id)
     except (TypeError, ValueError):
@@ -188,7 +93,6 @@ def _pick_primary_image(doc_id: Any, media_assets: dict[int, list[dict[str, str]
 
 
 def _build_caption(title: str, summary: str) -> str:
-    """Generate a short image caption for one story."""
     if summary:
         sentence = summary.split(". ")[0].strip()
         if sentence:
@@ -199,12 +103,10 @@ def _build_caption(title: str, summary: str) -> str:
 
 
 def _story_sort_key(story: dict[str, Any]) -> tuple[float, str]:
-    """Sort stories by score descending, then title."""
     return (-float(story.get("score") or 0), str(story.get("newsletter_title") or ""))
 
 
 def _sorted_story_sections(stories_by_section: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Convert grouped stories into a stable sorted section list for rendering."""
     return [
         {
             "name": section_name,
@@ -215,7 +117,6 @@ def _sorted_story_sections(stories_by_section: dict[str, list[dict[str, Any]]]) 
 
 
 def _render_markdown(*, run_timestamp: str, stories_by_section: dict[str, list[dict[str, Any]]]) -> str:
-    """Render the newsletter markdown from grouped story data."""
     edition_date = _format_indian_date(_parse_run_date(run_timestamp))
     total_story_count = sum(len(items) for items in stories_by_section.values())
     lines: list[str] = [
@@ -269,7 +170,6 @@ def _render_markdown(*, run_timestamp: str, stories_by_section: dict[str, list[d
 
 
 def _build_newsletter_render_context(*, run_timestamp: str, stories_by_section: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    """Build a reusable template context for newsletter rendering outputs."""
     sections = _sorted_story_sections(stories_by_section)
     total_story_count = sum(len(section["stories"]) for section in sections)
     edition_date = _format_indian_date(_parse_run_date(run_timestamp))
@@ -285,7 +185,6 @@ def _build_newsletter_render_context(*, run_timestamp: str, stories_by_section: 
 
 @lru_cache(maxsize=1)
 def _template_environment() -> Environment:
-    """Create the Jinja2 environment for newsletter templates."""
     return Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
         autoescape=select_autoescape(enabled_extensions=("html", "xml", "j2")),
@@ -295,13 +194,11 @@ def _template_environment() -> Environment:
 
 
 def _render_html(*, template_context: dict[str, Any]) -> str:
-    """Render the mobile-first printable HTML newsletter."""
     template = _template_environment().get_template(HTML_TEMPLATE_NAME)
     return template.render(**template_context)
 
 
 def _build_newsletter_instruction() -> str:
-    """Build the stable generation instruction stored for each newsletter run."""
     return (
         "Generate a markdown newsletter grouped by section. "
         "Deduplicate stories by source path, preserve the sectionizer summaries and facts, "
@@ -310,13 +207,11 @@ def _build_newsletter_instruction() -> str:
 
 
 def _build_newsletter_content(sectionizer_outputs: list[dict[str, Any]]) -> str:
-    """Build the per-run generation payload stored for newsletter audit/debugging."""
     return json.dumps(sectionizer_outputs, indent=2, ensure_ascii=True, default=str)
 
 
 def _persist_newsletter_run(
     *,
-    session: Any,
     run_timestamp: str,
     llm_instruction: str,
     llm_content: str,
@@ -325,38 +220,22 @@ def _persist_newsletter_run(
     output_payload: dict[str, Any],
     sectionizer_output_ids: list[int],
 ) -> int:
-    """Insert one newsletter run row and the referenced sectionizer-output links."""
-    _ensure_newsletter_schema()
-    created_at = _utc_now_iso()
-    row = NewsletterRun(
+    """Insert one newsletter run row and the referenced sectionizer-output links via API."""
+    return pipeline_client.create_newsletter_run(
         run_timestamp=run_timestamp,
         llm_instruction=llm_instruction,
         llm_content=llm_content,
         output_markdown=newsletter_markdown,
         output_html=newsletter_html,
-        output_json=json.dumps(output_payload, ensure_ascii=True, default=str),
-        created_at=created_at,
+        output_json=output_payload,
+        sectionizer_output_ids=sectionizer_output_ids,
     )
-    session.add(row)
-    session.flush()
-    newsletter_run_id = int(row.newsletter_run_id)
-
-    for sectionizer_output_id in sectionizer_output_ids:
-        session.add(
-            NewsletterRunSectionizerOutput(
-                newsletter_run_id=newsletter_run_id,
-                sectionizer_output_id=sectionizer_output_id,
-                created_at=created_at,
-            )
-        )
-    return newsletter_run_id
 
 
 class NewsletterGeneratorAgent(BaseAgent):
     """Builds a markdown newsletter from deduped sectionizer outputs and persists the run."""
 
     def __init__(self) -> None:
-        """Initialize the newsletter generator agent."""
         super().__init__(
             name="newsletter_generator_agent",
             description="Aggregates sectionizer outputs, deduplicates stories, and renders a markdown newsletter.",
@@ -416,13 +295,12 @@ class NewsletterGeneratorAgent(BaseAgent):
         newsletter_markdown = _render_markdown(run_timestamp=run_timestamp, stories_by_section=dict(stories_by_section))
         newsletter_html = _render_html(template_context=template_context)
 
-        output_payload = {
+        # Build payload without paths first — run ID not yet known
+        output_payload: dict[str, Any] = {
             "title": NEWSLETTER_TITLE,
             "runTimestamp": run_timestamp,
             "editionDate": _format_indian_date(edition_date),
-            "storage": "sqlite.newsletter_runs",
-            "newsletterPath": str(markdown_path),
-            "newsletterHtmlPath": str(html_path),
+            "storage": "postgresql.newsletter_runs",
             "generatedAt": _utc_now_iso(),
             "sectionCount": len(stories_by_section),
             "storyCount": sum(len(items) for items in stories_by_section.values()),
@@ -435,18 +313,15 @@ class NewsletterGeneratorAgent(BaseAgent):
             },
         }
 
-        newsletter_run_id = None
-        with session_scope() as session:
-            newsletter_run_id = _persist_newsletter_run(
-                session=session,
-                run_timestamp=run_timestamp,
-                llm_instruction=llm_instruction,
-                llm_content=llm_content,
-                newsletter_markdown=newsletter_markdown,
-                newsletter_html=newsletter_html,
-                output_payload=output_payload,
-                sectionizer_output_ids=sectionizer_output_ids,
-            )
+        newsletter_run_id = _persist_newsletter_run(
+            run_timestamp=run_timestamp,
+            llm_instruction=llm_instruction,
+            llm_content=llm_content,
+            newsletter_markdown=newsletter_markdown,
+            newsletter_html=newsletter_html,
+            output_payload=output_payload,
+            sectionizer_output_ids=sectionizer_output_ids,
+        )
 
         markdown_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}_run-{newsletter_run_id}.md"
         html_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}_run-{newsletter_run_id}.html"
