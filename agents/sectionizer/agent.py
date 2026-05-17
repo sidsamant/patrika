@@ -217,11 +217,13 @@ def _normalize_section_definition(raw_section: Any) -> dict[str, Any] | None:
 
     min_score = _to_score(raw_section.get("min_score"))
     objective = str(raw_section.get("objective") or "").strip() or None
+    ai_instructions = str(raw_section.get("ai_instructions") or "").strip() or None
     rules = _normalize_plaintext_rules(raw_section.get("rules"))
     return {
         "sectionizer_category_id": raw_section.get("sectionizer_category_id"),
         "name": name,
         "objective": objective,
+        "ai_instructions": ai_instructions,
         "min_score": min_score,
         "rules": rules,
     }
