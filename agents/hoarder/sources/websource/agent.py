@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import psycopg2
@@ -13,26 +16,53 @@ from google.adk.events import Event
 from google.genai import types
 
 from ...config import SourceConfig
-from ...storage import load_processed_hoarder_artifact_paths, record_hoarder_source_artifact, record_hoarder_source_run
-from ..common import merge_file_list
+from ...storage import persist_hoarder_payload, record_hoarder_source_run
 
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+_CHECKPOINT_PATH = _PROJECT_ROOT / ".output" / "checkpoints" / "websource.json"
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers
+# ---------------------------------------------------------------------------
+
+def _load_checkpoint() -> int:
+    """Return the last processed scraped_items.id (0 if no checkpoint exists)."""
+    if _CHECKPOINT_PATH.exists():
+        try:
+            data = json.loads(_CHECKPOINT_PATH.read_text(encoding="utf-8"))
+            return int(data.get("last_id", 0))
+        except Exception:
+            pass
+    return 0
+
+
+def _save_checkpoint(last_id: int) -> None:
+    """Persist the checkpoint atomically."""
+    _CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CHECKPOINT_PATH.write_text(
+        json.dumps({"last_id": last_id, "saved_at": datetime.now(timezone.utc).isoformat()}, indent=2),
+        encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Filtering helpers
+# ---------------------------------------------------------------------------
 
 def _is_twitter_target(raw_url: Any) -> bool:
-    """Return whether a URL points to X/Twitter and should be excluded."""
     url = str(raw_url or "").strip().lower()
     return "x.com/" in url or "twitter.com/" in url
 
 
 def _looks_like_draft(*values: Any) -> bool:
-    """Return whether any metadata field suggests a draft or internal item."""
-    haystack = " ".join(str(value or "").strip().lower() for value in values if str(value or "").strip())
+    haystack = " ".join(str(v or "").strip().lower() for v in values if str(v or "").strip())
     return any(token in haystack for token in ("draft", "wip", "work in progress", "internal only"))
 
 
 def _load_raw_item(raw_json: str) -> dict[str, Any]:
-    """Parse one Crawl4AI scraped-item JSON payload."""
     try:
         payload = json.loads(raw_json)
     except json.JSONDecodeError:
@@ -40,13 +70,11 @@ def _load_raw_item(raw_json: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _artifact_key(scraped_item_id: int) -> str:
-    """Build the audit key used to track already-hoarded crawl rows."""
-    return f"scraped_item:{scraped_item_id}"
-
+# ---------------------------------------------------------------------------
+# Row normalisation
+# ---------------------------------------------------------------------------
 
 def _normalize_scraped_row(source: SourceConfig, row: dict[str, Any]) -> dict[str, object] | None:
-    """Convert one Crawl4AI scraped_items row into the shared hoarder metadata schema."""
     item_id = int(row["id"])
     raw_item = _load_raw_item(str(row["raw_json"] or ""))
     url = str(row["url"] or "").strip()
@@ -107,6 +135,10 @@ def _normalize_scraped_row(source: SourceConfig, row: dict[str, Any]) -> dict[st
     }
 
 
+# ---------------------------------------------------------------------------
+# Database access
+# ---------------------------------------------------------------------------
+
 def _get_database_url() -> str:
     url = os.environ.get("CRAWL4AI_DATABASE_URL", "").strip()
     if not url:
@@ -114,18 +146,16 @@ def _get_database_url() -> str:
     return url
 
 
-def _load_unread_scraped_rows(source: SourceConfig) -> list[dict[str, Any]]:
-    """Load unread non-Twitter Crawl4AI rows ordered by first-seen time."""
-    processed_keys = load_processed_hoarder_artifact_paths(source.id)
+def _fetch_new_rows(last_id: int) -> list[dict[str, Any]]:
+    """Return scraped_items rows with id > last_id, ordered by id ASC."""
     database_url = _get_database_url()
-
     with psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT
                   si.id,
-                  si.source_id AS crawl_source_id,
+                  si.source_id  AS crawl_source_id,
                   si.run_source_id,
                   si.item_id,
                   si.section,
@@ -145,41 +175,38 @@ def _load_unread_scraped_rows(source: SourceConfig) -> list[dict[str, Any]]:
                   s.name AS source_name,
                   s.link AS source_link
                 FROM scraped_items si
-                JOIN sources s
-                  ON s.id = si.source_id
-                ORDER BY si.first_seen_at_utc ASC, si.id ASC
-                """
+                JOIN sources s ON s.id = si.source_id
+                WHERE si.id > %(last_id)s
+                ORDER BY si.id ASC
+                """,
+                {"last_id": last_id},
             )
-            rows: list[dict[str, Any]] = [dict(row) for row in cur.fetchall()]
+            return [dict(row) for row in cur.fetchall()]
 
-    unread_rows = [row for row in rows if _artifact_key(int(row["id"])) not in processed_keys]
-    logger.debug(
-        "WebSource found %d unread scraped_items rows out of %d total",
-        len(unread_rows),
-        len(rows),
-    )
-    return unread_rows
 
+# ---------------------------------------------------------------------------
+# Agent
+# ---------------------------------------------------------------------------
 
 class WebSourceHoarderAgent(BaseAgent):
-    """Read Crawl4AI scraped_items rows and hoard non-Twitter web entries."""
+    """Read new Crawl4AI scraped_items rows (since last checkpoint) and persist them directly."""
 
     def __init__(self, source: SourceConfig) -> None:
-        """Initialize the web-source hoarder agent for the configured Crawl4AI PostgreSQL database."""
         super().__init__(
             name="websource_hoarder",
-            description="Custom hoarder agent that reads Crawl4AI scraped items and extracts non-Twitter web entries.",
+            description="Reads new Crawl4AI scraped items since last checkpoint and persists them to the hoarder pipeline.",
         )
         self._source = source
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        """Collect unread Crawl4AI items, merge them into session state, and audit processed rows."""
         database_url = _get_database_url()
-        logger.debug("Running websource hoarder for source_id=%s db=%s", self._source.id, database_url)
+        last_id = _load_checkpoint()
+        logger.debug(
+            "WebSource starting: source_id=%s checkpoint_last_id=%d", self._source.id, last_id
+        )
 
-        collected_items: list[dict[str, object]] = []
         try:
-            unread_rows = _load_unread_scraped_rows(self._source)
+            new_rows = await asyncio.to_thread(_fetch_new_rows, last_id)
         except Exception as error:
             record_hoarder_source_run(
                 source_id=self._source.id,
@@ -189,39 +216,40 @@ class WebSourceHoarderAgent(BaseAgent):
             )
             raise
 
-        for row in unread_rows:
-            scraped_item_id = int(row["id"])
-            audit_key = _artifact_key(scraped_item_id)
+        collected_items: list[dict[str, object]] = []
+        max_id_seen = last_id
+
+        for row in new_rows:
+            row_id = int(row["id"])
+            if row_id > max_id_seen:
+                max_id_seen = row_id
             try:
                 normalized = _normalize_scraped_row(self._source, row)
                 if normalized is not None:
                     collected_items.append(normalized)
-                record_hoarder_source_artifact(
-                    source_id=self._source.id,
-                    artifact_path=audit_key,
-                    status="success",
-                    error_text=None,
-                )
-                logger.debug("WebSource ingested scraped_item id=%s", scraped_item_id)
-            except Exception as error:
-                record_hoarder_source_artifact(
-                    source_id=self._source.id,
-                    artifact_path=audit_key,
-                    status="error",
-                    error_text=str(error),
-                )
-                logger.exception("WebSource failed reading scraped_item id=%s", scraped_item_id)
+            except Exception:
+                logger.exception("WebSource failed normalising scraped_item id=%s", row_id)
+
+        logger.debug(
+            "WebSource: %d new rows fetched, %d accepted after filtering",
+            len(new_rows),
+            len(collected_items),
+        )
+
+        persisted_count = 0
+        if collected_items:
+            persisted_count = await asyncio.to_thread(persist_hoarder_payload, collected_items)
+
+        if max_id_seen > last_id:
+            _save_checkpoint(max_id_seen)
+            logger.debug("WebSource checkpoint updated: last_id=%d", max_id_seen)
 
         record_hoarder_source_run(
             source_id=self._source.id,
             source_path=database_url,
             status="success",
-            item_count=len(collected_items),
+            item_count=persisted_count,
         )
-
-        merged_items = merge_file_list(ctx.session.state.get("file_list"), collected_items)
-        ctx.session.state["file_list"] = json.dumps(merged_items)
-        logger.debug("Merged websource results into session state. total_items=%d", len(merged_items))
 
         yield Event(
             author=self.name,
@@ -233,9 +261,11 @@ class WebSourceHoarderAgent(BaseAgent):
                         text=json.dumps(
                             {
                                 "sourceId": self._source.id,
-                                "processedScrapedItemCount": len(unread_rows),
-                                "fileCount": len(collected_items),
-                                "files": collected_items,
+                                "checkpointLastId": last_id,
+                                "newRowsFetched": len(new_rows),
+                                "itemsAccepted": len(collected_items),
+                                "itemsPersisted": persisted_count,
+                                "newCheckpointLastId": max_id_seen,
                             },
                             indent=2,
                         )
@@ -246,5 +276,5 @@ class WebSourceHoarderAgent(BaseAgent):
 
 
 def create_websource_hoarder_agent(source: SourceConfig) -> BaseAgent:
-    """Create a WebSource hoarder agent for the configured Crawl4AI PostgreSQL database."""
+    """Create a WebSource hoarder agent backed by the Crawl4AI PostgreSQL database."""
     return WebSourceHoarderAgent(source)

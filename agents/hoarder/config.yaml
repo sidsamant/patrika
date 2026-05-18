@@ -25,7 +25,7 @@ sources:
 
   - id: websource
     enabled: true
-    path: "D:/ai/crawl4ai/data/crawler.sqlite3"
+    path: "dummy"
 
   - id: twitter
     enabled: false
