@@ -70,6 +70,13 @@ def _load_raw_item(raw_json: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _content_text_from_raw_item(raw_item: dict[str, Any], title: str, description: str) -> str:
+    markdown = str(raw_item.get("markdown") or "").strip()
+    if markdown:
+        return markdown
+    return "\n\n".join(part for part in [title, description] if part).strip()
+
+
 # ---------------------------------------------------------------------------
 # Row normalisation
 # ---------------------------------------------------------------------------
@@ -93,7 +100,7 @@ def _normalize_scraped_row(source: SourceConfig, row: dict[str, Any]) -> dict[st
 
     source_name = str(row["source_name"] or "").strip()
     source_link = str(row["source_link"] or "").strip()
-    content_text = "\n\n".join(part for part in [title, description] if part).strip()
+    content_text = _content_text_from_raw_item(raw_item, title, description)
     return {
         "sourceId": source.id,
         "sourceType": "webpage",
