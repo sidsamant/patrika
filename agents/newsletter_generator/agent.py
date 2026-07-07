@@ -219,6 +219,7 @@ def _persist_newsletter_run(
     newsletter_html: str,
     output_payload: dict[str, Any],
     sectionizer_output_ids: list[int],
+    newsletter_slug: str | None = None,
 ) -> int:
     """Insert one newsletter run row and the referenced sectionizer-output links via API."""
     return pipeline_client.create_newsletter_run(
@@ -229,6 +230,7 @@ def _persist_newsletter_run(
         output_html=newsletter_html,
         output_json=output_payload,
         sectionizer_output_ids=sectionizer_output_ids,
+        newsletter_slug=newsletter_slug,
     )
 
 
@@ -313,6 +315,8 @@ class NewsletterGeneratorAgent(BaseAgent):
             },
         }
 
+        newsletter_slug = ctx.session.state.get("newsletter_slug")
+
         newsletter_run_id = _persist_newsletter_run(
             run_timestamp=run_timestamp,
             llm_instruction=llm_instruction,
@@ -321,6 +325,7 @@ class NewsletterGeneratorAgent(BaseAgent):
             newsletter_html=newsletter_html,
             output_payload=output_payload,
             sectionizer_output_ids=sectionizer_output_ids,
+            newsletter_slug=newsletter_slug,
         )
 
         markdown_path = NEWSLETTER_OUTPUT_DIR / f"gagan-gaze_{file_date}_run-{newsletter_run_id}.md"

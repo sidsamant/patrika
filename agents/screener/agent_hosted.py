@@ -84,6 +84,23 @@ class FileMetadataScreeningAgent(BaseAgent):
         logger.debug("Initialized hosted screener with ADK LLM reviewer")
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
+        newsletter_slug = ctx.session.state.get("newsletter_slug")
+        if newsletter_slug:
+            try:
+                from agents import pipeline_client
+                settings_payload = pipeline_client.load_newsletter_settings(newsletter_slug)
+                settings = settings_payload.get("settings", {})
+                custom_model = settings.get("screener_model")
+                custom_prompt = settings.get("screener_prompt")
+                if custom_model:
+                    self._reviewer.model = custom_model
+                    logger.debug("Screener dynamic model override: %s", custom_model)
+                if custom_prompt:
+                    ctx.session.state["screener_prompt"] = custom_prompt
+                    logger.debug("Screener dynamic prompt template loaded.")
+            except Exception as e:
+                logger.error("Failed to load screener newsletter settings: %s", e)
+
         all_hoarder_items = load_hoarder_rows_for_screening()
         logger.debug("Loaded %d hoarder rows eligible for hosted screening", len(all_hoarder_items))
         hoarder_items, passthrough_items = _split_hoarder_items(all_hoarder_items)

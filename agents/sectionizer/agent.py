@@ -144,9 +144,14 @@ def _utc_now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
-def _load_categories_from_db() -> list[dict[str, Any]]:
+def _load_categories_from_db(newsletter_slug: str | None = None) -> list[dict[str, Any]]:
     """Load sectionizer categories from the pipeline API (pipeline.sectionizer_categories table)."""
     try:
+        if newsletter_slug:
+            from agents import pipeline_client
+            settings_payload = pipeline_client.load_newsletter_settings(newsletter_slug)
+            return settings_payload.get("categories") or []
+        
         categories = pipeline_client.load_sectionizer_categories()
         logger.debug("Loaded %d sectionizer categories from pipeline API", len(categories))
         return categories
@@ -533,8 +538,31 @@ class SectionizerAgent(BaseAgent):
         if user_prompt:
             logger.debug("Sectionizer upstream runner prompt (not forwarded to Gemini): %s", user_prompt)
 
-        section_defs = _normalize_section_definitions(_load_categories_from_db())
+        newsletter_slug = ctx.session.state.get("newsletter_slug")
+        custom_model = None
+        custom_prompt = None
+        if newsletter_slug:
+            try:
+                from agents import pipeline_client
+                settings_payload = pipeline_client.load_newsletter_settings(newsletter_slug)
+                settings = settings_payload.get("settings", {})
+                custom_model = settings.get("sectionizer_model")
+                custom_prompt = settings.get("sectionizer_prompt")
+                if custom_model:
+                    self._reviewer.model = custom_model
+                    logger.debug("Sectionizer dynamic model override: %s", custom_model)
+            except Exception as e:
+                logger.error("Failed to load sectionizer newsletter settings: %s", e)
+
+        section_defs = _normalize_section_definitions(_load_categories_from_db(newsletter_slug))
         logger.debug("Sectionizer will evaluate %d section definitions.", len(section_defs))
+
+        if custom_prompt:
+            static_instruction = _render_prompt(custom_prompt, section_defs=section_defs)
+        else:
+            static_instruction = _build_static_instruction(section_defs)
+        
+        self._reviewer.static_instruction = static_instruction
 
         standardized_rows, row_source = _load_standardized_rows(ctx)
         logger.debug("Sectionizer row source: %s (%d rows)", row_source, len(standardized_rows))

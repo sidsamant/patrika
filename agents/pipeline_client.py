@@ -249,6 +249,7 @@ def create_newsletter_run(
     sectionizer_output_ids: list[int],
     pipeline_run_id: int | None = None,
     agent_run_id: int | None = None,
+    newsletter_slug: str | None = None,
 ) -> int:
     result = _post("newsletter-runs/", {
         "run_timestamp": run_timestamp,
@@ -260,5 +261,11 @@ def create_newsletter_run(
         "sectionizer_output_ids": sectionizer_output_ids,
         "pipeline_run_id": pipeline_run_id,
         "agent_run_id": agent_run_id,
+        "newsletter_slug": newsletter_slug,
     })
     return int(result.get("newsletter_run_id") or 0)
+
+
+def load_newsletter_settings(newsletter_slug: str) -> dict[str, Any]:
+    """Fetch prompt instructions, category list, and model configs for a newsletter."""
+    return _get(f"newsletters/{newsletter_slug}/settings/")

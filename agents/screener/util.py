@@ -44,6 +44,10 @@ def _screening_rules_json(context: ReadonlyContext | Any) -> str:
 
 def reviewer_instruction_provider(context: ReadonlyContext | Any) -> str:
     """Build the stable system instruction for the screener reviewer."""
+    custom_prompt = _state_get(context, "screener_prompt")
+    if custom_prompt:
+        return custom_prompt
+
     screening_rules_json = _screening_rules_json(context)
 
     return f"""You are a metadata screening agent.
