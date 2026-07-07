@@ -23,9 +23,14 @@ from agents.sectionizer.agent import sectionizer_agent
 OUTPUT_FILE_PATH = PROJECT_ROOT / "agent_output.txt"
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
 )
+
+# Suppress verbose third-party loggers
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("google_adk").setLevel(logging.DEBUG)
 
 

@@ -31,7 +31,7 @@ def _configure_logging() -> logging.Logger:
     """Attach console and file handlers for hoarder debug logs."""
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.INFO)
 
     if not any(isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler) for handler in root_logger.handlers):
         stream_handler = logging.StreamHandler()
@@ -49,6 +49,12 @@ def _configure_logging() -> logging.Logger:
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
+
+    # Suppress verbose third-party loggers and configure google_adk for DEBUG
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("google_adk").setLevel(logging.DEBUG)
 
     return logging.getLogger(__name__)
 

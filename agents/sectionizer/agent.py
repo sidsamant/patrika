@@ -35,7 +35,7 @@ LLM_REQUEST_DELAY_SECONDS = max(float(os.getenv("SECTIONIZER_LLM_DELAY_SECONDS",
 def _configure_logging() -> logging.Logger:
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.INFO)
 
     if not any(isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler) for handler in root_logger.handlers):
         stream_handler = logging.StreamHandler()
@@ -53,6 +53,12 @@ def _configure_logging() -> logging.Logger:
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
+
+    # Suppress verbose third-party loggers and configure google_adk for DEBUG
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("google_adk").setLevel(logging.DEBUG)
 
     return logging.getLogger(__name__)
 
@@ -148,7 +154,6 @@ def _load_categories_from_db(newsletter_slug: str | None = None) -> list[dict[st
     """Load sectionizer categories from the pipeline API (pipeline.sectionizer_categories table)."""
     try:
         if newsletter_slug:
-            from agents import pipeline_client
             settings_payload = pipeline_client.load_newsletter_settings(newsletter_slug)
             return settings_payload.get("categories") or []
         
@@ -534,28 +539,29 @@ class SectionizerAgent(BaseAgent):
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         """Evaluate each standardized row with the internal ADK LLM agent and emit persisted mappings."""
+        newsletter_slug = ctx.session.state.get("newsletter_slug")
+        nl_id = f"[newsletter: {newsletter_slug}] " if newsletter_slug else "[newsletter: none] "
+
         user_prompt = _content_to_text(ctx.user_content)
         if user_prompt:
-            logger.debug("Sectionizer upstream runner prompt (not forwarded to Gemini): %s", user_prompt)
+            logger.debug(nl_id + "Sectionizer upstream runner prompt (not forwarded to Gemini): %s", user_prompt)
 
-        newsletter_slug = ctx.session.state.get("newsletter_slug")
         custom_model = None
         custom_prompt = None
         if newsletter_slug:
             try:
-                from agents import pipeline_client
                 settings_payload = pipeline_client.load_newsletter_settings(newsletter_slug)
                 settings = settings_payload.get("settings", {})
                 custom_model = settings.get("sectionizer_model")
                 custom_prompt = settings.get("sectionizer_prompt")
                 if custom_model:
                     self._reviewer.model = custom_model
-                    logger.debug("Sectionizer dynamic model override: %s", custom_model)
+                    logger.debug(nl_id + "Sectionizer dynamic model override: %s", custom_model)
             except Exception as e:
-                logger.error("Failed to load sectionizer newsletter settings: %s", e)
+                logger.error(nl_id + "Failed to load sectionizer newsletter settings: %s", e)
 
         section_defs = _normalize_section_definitions(_load_categories_from_db(newsletter_slug))
-        logger.debug("Sectionizer will evaluate %d section definitions.", len(section_defs))
+        logger.debug(nl_id + "Sectionizer will evaluate %d section definitions.", len(section_defs))
 
         if custom_prompt:
             static_instruction = _render_prompt(custom_prompt, section_defs=section_defs)
@@ -565,13 +571,13 @@ class SectionizerAgent(BaseAgent):
         self._reviewer.static_instruction = static_instruction
 
         standardized_rows, row_source = _load_standardized_rows(ctx)
-        logger.debug("Sectionizer row source: %s (%d rows)", row_source, len(standardized_rows))
+        logger.debug(nl_id + "Sectionizer row source: %s (%d rows)", row_source, len(standardized_rows))
 
         persisted_outputs: list[dict[str, Any]] = []
 
         for row_index, row in enumerate(standardized_rows):
             if row_index > 0 and LLM_REQUEST_DELAY_SECONDS > 0:
-                logger.debug("Sleeping %.2f seconds before next sectionizer LLM call.", LLM_REQUEST_DELAY_SECONDS)
+                logger.debug(nl_id + "Sleeping %.2f seconds before next sectionizer LLM call.", LLM_REQUEST_DELAY_SECONDS)
                 await asyncio.sleep(LLM_REQUEST_DELAY_SECONDS)
 
             ctx.session.state["sectionizer_current_row"] = row
@@ -587,7 +593,7 @@ class SectionizerAgent(BaseAgent):
                         raw_response = text
 
             if raw_response:
-                logger.debug("Sectionizer raw Gemini response:\n%s", raw_response)
+                logger.debug(nl_id + "Sectionizer raw Gemini response:\n%s", raw_response)
 
             llm_instruction = str(ctx.session.state.get("sectionizer_runtime_instruction") or "").strip()
             llm_content = str(ctx.session.state.get("sectionizer_runtime_document_payload") or "").strip()
@@ -617,13 +623,13 @@ class SectionizerAgent(BaseAgent):
             )
             persisted_outputs.append(
                 {
-                    **persisted_record,
-                    "match_count": len(matches),
-                    "output": row_output_payload,
+                     **persisted_record,
+                     "match_count": len(matches),
+                     "output": row_output_payload,
                 }
             )
             logger.debug(
-                "Row %s produced %d passing sections out of %d evaluations and was inserted into sectionizer_outputs with id=%s.",
+                nl_id + "Row %s produced %d passing sections out of %d evaluations and was inserted into sectionizer_outputs with id=%s.",
                 row.get("doc_id"),
                 len(matches),
                 len(evaluations),
@@ -642,7 +648,7 @@ class SectionizerAgent(BaseAgent):
             "outputs": persisted_outputs,
         }
         ctx.session.state["section_mappings"] = json.dumps(output_payload)
-        logger.debug("Sectionizer output payload: %s", json.dumps(output_payload, ensure_ascii=True))
+        logger.debug(nl_id + "Sectionizer output payload: %s", json.dumps(output_payload, ensure_ascii=True))
 
         yield Event(
             author=self.name,
