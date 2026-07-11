@@ -19,6 +19,7 @@ from agents.screener.agent import file_metadata_screening_agent as ollama_screen
 from agents.screener.agent_hosted import file_metadata_screening_agent as hosted_screener_agent
 from agents.standardizer.agent import standardizer_agent
 from agents.sectionizer.agent import sectionizer_agent
+from agents.curator_greeting.agent import curator_greeting_agent
 
 OUTPUT_FILE_PATH = PROJECT_ROOT / "agent_output.txt"
 

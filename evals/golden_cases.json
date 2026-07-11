@@ -1,0 +1,44 @@
+{
+  "screener_cases": [
+    {
+      "id": 1,
+      "pageTitle": "SpaceX successfully launches Falcon 9 from Cape Canaveral",
+      "pageSummary": "SpaceX completed another launch of its Falcon 9 rocket, placing 23 Starlink satellites into low Earth orbit.",
+      "pageUrl": "https://example.com/spacex-launch",
+      "expected_selected": true
+    },
+    {
+      "id": 2,
+      "pageTitle": "Delicious local bakery recipes for cupcakes",
+      "pageSummary": "Here are 5 secrets to making the softest vanilla cupcakes with sweet butter frosting.",
+      "pageUrl": "https://example.com/cupcake-recipes",
+      "expected_selected": false
+    }
+  ],
+  "standardizer_cases": [
+    {
+      "id": 1,
+      "text_content": "AstroNews - July 2026. Author: Sid Samant. Today SpaceX announced their new satellite launcher specifications.",
+      "expected_author": "Sid Samant",
+      "expected_mentions": ["SpaceX"]
+    }
+  ],
+  "sectionizer_cases": [
+    {
+      "id": 1,
+      "text_content": "Isro has successfully launched its new SSLV developmental flight from Sriharikota, putting experimental satellites into polar orbits.",
+      "expected_category": "Satellite & EO"
+    },
+    {
+      "id": 2,
+      "text_content": "Skyroot Aerospace receives 50 million dollars in private series B funding to scale launch vehicle Vikram-1.",
+      "expected_category": "Launch & Propulsion"
+    }
+  ],
+  "greeter_cases": [
+    {
+      "id": 1,
+      "expected_next_step": "Standardizer"
+    }
+  ]
+}

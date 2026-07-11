@@ -68,7 +68,7 @@ class FileMetadataScreeningAgent(BaseAgent):
     def __init__(self) -> None:
         reviewer = LlmAgent(
             name="file_metadata_reviewer_llm",
-            model="gemini-2.5-flash-lite",
+            model="gemini-3.5-flash",
             description="Reviews filesystem metadata and decides which files are eligible for ingestion.",
             output_key="screened_file_list",
             instruction=reviewer_instruction_provider,

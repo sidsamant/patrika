@@ -90,7 +90,7 @@ def _get_genai_client() -> genai.Client:
 
 
 def _count_token_parts(runtime_instruction: str, llm_request: LlmRequest) -> tuple[int | None, int | None, int | None]:
-    model_name = llm_request.model or os.getenv("SECTIONIZER_GEMINI_MODEL", "gemini-2.5-flash-lite")
+    model_name = llm_request.model or os.getenv("SECTIONIZER_GEMINI_MODEL", "gemini-3.5-flash")
     try:
         instruction_response = _get_genai_client().models.count_tokens(
             model=model_name,
@@ -519,7 +519,7 @@ class SectionizerAgent(BaseAgent):
 
         reviewer = LlmAgent(
             name="sectionizer_llm_reviewer",
-            model=os.getenv("SECTIONIZER_GEMINI_MODEL", "gemini-2.5-flash-lite"),
+            model=os.getenv("SECTIONIZER_GEMINI_MODEL", "gemini-3.5-flash"),
             description="Scores documents against configured newsletter sections.",
             static_instruction=static_instruction,
             before_model_callback=sectionizer_before_model_callback,
