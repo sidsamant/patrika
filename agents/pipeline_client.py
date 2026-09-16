@@ -269,3 +269,74 @@ def create_newsletter_run(
 def load_newsletter_settings(newsletter_slug: str) -> dict[str, Any]:
     """Fetch prompt instructions, category list, and model configs for a newsletter."""
     return _get(f"newsletters/{newsletter_slug}/settings/")
+
+
+# ── Batch Sectionizer Job Helpers ──────────────────────────────────────────────
+
+def record_batch_sectionizer_job(batch_job_name: str, doc_ids: list[int], status: str = "PENDING") -> dict[str, Any]:
+    return _post("batch-jobs/", {
+        "batch_job_name": batch_job_name,
+        "doc_ids": doc_ids,
+        "status": status,
+    })
+
+
+def update_batch_sectionizer_job_status(batch_job_name: str, status: str, error_text: str | None = None, usage_meta: dict | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"status": status}
+    if error_text:
+        body["error_text"] = error_text
+    if usage_meta:
+        body["usage_meta"] = usage_meta
+    return _patch(f"batch-jobs/{batch_job_name}/", body)
+
+
+# ── LLM Cost Approval Helpers ──────────────────────────────────────────────────
+
+def create_approval_request(
+    *,
+    workflow_id: str,
+    step_name: str,
+    target_model: str,
+    input_tokens: int,
+    estimated_output_tokens: int,
+    estimated_cost_usd: float,
+    estimated_cost_inr: float,
+    prompt_summary: str,
+    token_breakdown: dict[str, Any],
+) -> dict[str, Any]:
+    """Register a new pre-call LLM cost approval request in Django DB."""
+    return _post("approvals/", {
+        "workflow_id": workflow_id,
+        "step_name": step_name,
+        "target_model": target_model,
+        "input_tokens": input_tokens,
+        "estimated_output_tokens": estimated_output_tokens,
+        "estimated_cost_usd": str(estimated_cost_usd),
+        "estimated_cost_inr": str(estimated_cost_inr),
+        "prompt_summary": prompt_summary,
+        "token_breakdown": token_breakdown,
+    })
+
+
+def get_approval_status(workflow_id: str) -> dict[str, Any]:
+    """Fetch status of cost approval request by workflow_id."""
+    return _get(f"approvals/{workflow_id}/")
+
+
+def update_approval_actuals(
+    approval_id: int,
+    *,
+    actual_prompt_tokens: int,
+    actual_completion_tokens: int,
+    actual_total_tokens: int,
+    actual_cost_usd: float,
+    actual_cost_inr: float,
+) -> dict[str, Any]:
+    """Update approval request with post-execution actual token counts and reconciled costs."""
+    return _patch(f"approvals/{approval_id}/actuals/", {
+        "actual_prompt_tokens": actual_prompt_tokens,
+        "actual_completion_tokens": actual_completion_tokens,
+        "actual_total_tokens": actual_total_tokens,
+        "actual_cost_usd": str(actual_cost_usd),
+        "actual_cost_inr": str(actual_cost_inr),
+    })

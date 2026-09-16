@@ -32,7 +32,18 @@
       "Bash(../.venv/Scripts/pip show *)",
       "Bash(d:/ai/newsletter_adk/.venv/Scripts/pip show *)",
       "Bash(d:/ai/newsletter_adk/.venv/Scripts/pip install *)",
-      "Bash(d:/ai/newsletter_adk/.venv/Scripts/python manage.py migrate)"
+      "Bash(d:/ai/newsletter_adk/.venv/Scripts/python manage.py migrate)",
+      "Bash(d:/ai/newsletter_adk/.venv/Scripts/python manage.py shell -c ' *)",
+      "Bash(d:/ai/newsletter_adk/.venv/Scripts/python -c ' *)",
+      "Bash(.venv/Scripts/python manage.py migrate pipeline 0007)",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(.venv/Scripts/python -c ' *)",
+      "Bash(.venv/Scripts/python -m src.run_sources)",
+      "Bash(/d/ai/newsletter_adk/.venv/Scripts/python -c \"import psycopg2; print\\('psycopg2 ok:', psycopg2.__version__\\)\")",
+      "Bash(.venv/Scripts/python -c \"import psycopg2, psycopg2.extras; print\\('psycopg2 OK'\\)\")",
+      "Bash(.venv/Scripts/python -m py_compile agents/hoarder/sources/websource/agent.py)",
+      "PowerShell(Rename-Item \"d:\\\\ai\\\\sentinelpress\\\\hoarder\" \"d:\\\\ai\\\\sentinelpress\\\\articles\")",
+      "PowerShell(Rename-Item \"d:\\\\ai\\\\sentinelpress\\\\articles\\\\templates\\\\hoarder\" \"d:\\\\ai\\\\sentinelpress\\\\articles\\\\templates\\\\articles\")"
     ]
   }
 }
