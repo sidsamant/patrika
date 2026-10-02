@@ -1,0 +1,45 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "ADK Web Bulk Generator",
+            "type": "shell",
+            "command": ".\\.venv\\Scripts\\Activate.ps1; cd ./agents ; adk web bulk_newsgenerator --port 8280;",
+            "options": {
+                "env": {
+                    "OTEL_SERVICE_NAME": "adk-agent-service"
+                },
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+                }
+            },
+            "group": "none",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": [] 
+        }
+,        {
+            "label": "ADK API",
+            "type": "shell",
+            "command": ".\\.venv\\Scripts\\Activate.ps1;  adk.exe api_server agents/ --port 8001 ;",
+            "options": {
+                "env": {
+                    "OTEL_SERVICE_NAME": "adk-agent-service"
+                },
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+                }
+            },
+            "group": "none",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": [] 
+        }
+    ]
+}

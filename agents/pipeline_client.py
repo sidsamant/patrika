@@ -273,11 +273,12 @@ def load_newsletter_settings(newsletter_slug: str) -> dict[str, Any]:
 
 # ── Batch Sectionizer Job Helpers ──────────────────────────────────────────────
 
-def record_batch_sectionizer_job(batch_job_name: str, doc_ids: list[int], status: str = "PENDING") -> dict[str, Any]:
+def record_batch_sectionizer_job(batch_job_name: str, doc_ids: list[int], status: str = "PENDING", usage_meta: dict | None = None) -> dict[str, Any]:
     return _post("batch-jobs/", {
         "batch_job_name": batch_job_name,
         "doc_ids": doc_ids,
         "status": status,
+        "usage_meta": usage_meta or {},
     })
 
 

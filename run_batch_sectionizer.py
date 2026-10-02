@@ -52,11 +52,19 @@ def main():
         usage_meta["batch_cost_inr"],
     )
 
-    batch_job_name = submit_batch_job(jsonl_path)
+    batch_job = submit_batch_job(jsonl_path)
+    batch_job_name = getattr(batch_job, "name", str(batch_job))
+
+    try:
+        if hasattr(batch_job, "model_dump_json"):
+            usage_meta["create_batch_response"] = json.loads(batch_job.model_dump_json())
+    except Exception as e:
+        logger.warning("Could not dump BatchJob response: %s", e)
+
     doc_ids = [d.get("standardized_doc_id") or d.get("doc_id") for d in docs]
     
     # Record batch job in Django DB via pipeline_client
-    pipeline_client.record_batch_sectionizer_job(batch_job_name=batch_job_name, doc_ids=doc_ids, status="PENDING")
+    pipeline_client.record_batch_sectionizer_job(batch_job_name=batch_job_name, doc_ids=doc_ids, status="PENDING", usage_meta=usage_meta)
     
     pipeline_client.finish_agent_run(agent_run_id, status="complete", items_in=len(docs), items_out=len(docs))
     logger.info("Batch sectionizer job submitted successfully: %s | Estimated Cost: $%.6f", batch_job_name, usage_meta["batch_cost_usd"])

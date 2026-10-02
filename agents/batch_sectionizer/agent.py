@@ -28,6 +28,10 @@ load_dotenv(ENV_PATH)
 
 logger = logging.getLogger(__name__)
 
+# Constant for batch LLM model - cheapest model for Gemini Batch API
+BATCH_MODEL_NAME = os.getenv("BATCH_SECTIONIZER_MODEL", "gemini-1.5-flash")
+
+
 def _get_genai_client() -> genai.Client:
     for env_name in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GENAI_API_KEY"):
         api_key = os.getenv(env_name)
@@ -36,7 +40,12 @@ def _get_genai_client() -> genai.Client:
     return genai.Client()
 
 
-def prepare_batch_jsonl(documents: list[dict[str, Any]], categories: list[dict[str, Any]], output_jsonl_path: str, model_name: str = "gemini-2.5-flash") -> tuple[int, dict[str, Any]]:
+def prepare_batch_jsonl(
+    documents: list[dict[str, Any]],
+    categories: list[dict[str, Any]],
+    output_jsonl_path: str,
+    model_name: str = BATCH_MODEL_NAME,
+) -> tuple[int, dict[str, Any]]:
     """Formats a list of documents into JSONL format for Gemini Batch API and calculates estimated token counts & costs."""
     from workflows.pricing_matrix import calculate_cost
 
@@ -60,14 +69,19 @@ def prepare_batch_jsonl(documents: list[dict[str, Any]], categories: list[dict[s
 
         total_prompt_chars += len(prompt)
 
+        # Standard Gemini Batch API request format (key + request)
         request_row = {
-            "custom_id": f"doc_{doc_id}",
-            "method": "POST",
-            "url": "/v1/chat/completions",
-            "body": {
-                "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
-                "response_format": {"type": "json_object"},
+            "key": f"doc_{doc_id}",
+            "request": {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": prompt}],
+                    }
+                ],
+                "generationConfig": {
+                    "responseMimeType": "application/json"
+                },
             },
         }
         lines.append(json.dumps(request_row))
@@ -102,8 +116,8 @@ def prepare_batch_jsonl(documents: list[dict[str, Any]], categories: list[dict[s
     return len(lines), usage_meta
 
 
-def submit_batch_job(jsonl_file_path: str) -> str:
-    """Uploads batch JSONL and submits Gemini Batch API job."""
+def submit_batch_job(jsonl_file_path: str, model_name: str = BATCH_MODEL_NAME) -> types.BatchJob:
+    """Uploads batch JSONL and submits Gemini Batch API job, returning the SDK types.BatchJob object."""
     client = _get_genai_client()
     logger.info("Uploading batch JSONL file to Gemini API: %s", jsonl_file_path)
     file_ref = client.files.upload(
@@ -111,62 +125,106 @@ def submit_batch_job(jsonl_file_path: str) -> str:
         config=types.UploadFileConfig(mime_type="text/plain"),
     )
     
-    logger.info("Creating Gemini Batch Job using model gemini-2.5-flash...")
-    batch_job = client.batches.create(
-        model="gemini-2.5-flash",
+    logger.info("Creating Gemini Batch Job using model %s...", model_name)
+    batch_job: types.BatchJob = client.batches.create(
+        model=model_name,
         src=file_ref.name,
     )
     logger.info("Batch job created successfully. Job Name: %s", batch_job.name)
-    return batch_job.name
+    return batch_job
 
 
-def check_and_process_batch_job(batch_job_id: str, run_timestamp: str, agent_run_id: int | None = None) -> str:
+def check_and_process_batch_job(batch_job_id: str, run_timestamp: str, agent_run_id: int | None = None, model_name: str = BATCH_MODEL_NAME) -> str:
     """Checks Gemini Batch Job status. If complete, downloads results and inserts NEW SectionizerOutput rows."""
     client = _get_genai_client()
     batch_job = client.batches.get(name=batch_job_id)
     state = getattr(batch_job, "state", "UNKNOWN")
     logger.info("Batch Job %s state: %s", batch_job_id, state)
 
-    if str(state).endswith("SUCCEEDED") or str(state) == "BATCH_JOB_STATE_SUCCEEDED":
-        # Process results
-        results = getattr(batch_job, "dest", None) or []
+    state_str = str(state)
+    if state_str.endswith("SUCCEEDED") or state_str == "BATCH_JOB_STATE_SUCCEEDED" or state_str == "JOB_STATE_SUCCEEDED":
+        dest = getattr(batch_job, "dest", None)
+        output_file_name = None
+        if isinstance(dest, str):
+            output_file_name = dest
+        elif hasattr(dest, "file_name"):
+            output_file_name = getattr(dest, "file_name")
+        elif isinstance(dest, dict) and "file_name" in dest:
+            output_file_name = dest["file_name"]
+
+        result_lines: list[Any] = []
+        if output_file_name:
+            try:
+                content_bytes = client.files.download(file=output_file_name)
+                content_text = content_bytes.decode("utf-8") if isinstance(content_bytes, bytes) else str(content_bytes)
+                result_lines = [line.strip() for line in content_text.splitlines() if line.strip()]
+            except Exception as e:
+                logger.error("Failed to download batch output file %s: %s", output_file_name, e)
+
+        if not result_lines and isinstance(dest, (list, tuple)):
+            result_lines = list(dest)
+
         created_count = 0
         total_prompt_tokens = 0
         total_candidates_tokens = 0
 
-        for item in results:
-            custom_id = getattr(item, "custom_id", "")
+        for item in result_lines:
+            if isinstance(item, str):
+                try:
+                    item_dict = json.loads(item)
+                except Exception:
+                    continue
+            elif isinstance(item, dict):
+                item_dict = item
+            elif hasattr(item, "model_dump"):
+                try:
+                    item_dict = item.model_dump()
+                except Exception:
+                    continue
+            else:
+                continue
+
+            custom_id = item_dict.get("key") or item_dict.get("custom_id") or ""
             doc_id = int(custom_id.replace("doc_", "")) if custom_id.startswith("doc_") else None
             if not doc_id:
                 continue
 
-            response_body = getattr(item, "response", {})
-            if not isinstance(response_body, dict) and hasattr(response_body, "model_dump"):
-                try:
-                    response_body = response_body.model_dump()
-                except Exception:
-                    response_body = {}
+            if item_dict.get("error"):
+                logger.warning("Error in batch result for doc_%s: %s", doc_id, item_dict.get("error"))
+                continue
 
-            body_dict = response_body.get("body") if isinstance(response_body, dict) else {}
-            if not body_dict:
-                body_dict = response_body if isinstance(response_body, dict) else {}
+            response_obj = item_dict.get("response") or item_dict.get("body") or item_dict
 
-            usage_raw = body_dict.get("usage") or body_dict.get("usageMetadata") or body_dict.get("usage_metadata") or {}
-            prompt_tok = usage_raw.get("prompt_tokens") or usage_raw.get("promptTokenCount") or usage_raw.get("prompt_token_count") or 0
-            cand_tok = usage_raw.get("completion_tokens") or usage_raw.get("candidatesTokenCount") or usage_raw.get("candidates_token_count") or 0
+            usage_raw = response_obj.get("usageMetadata") or response_obj.get("usage_metadata") or response_obj.get("usage") or {}
+            prompt_tok = (
+                usage_raw.get("promptTokenCount")
+                or usage_raw.get("prompt_token_count")
+                or usage_raw.get("prompt_tokens")
+                or 0
+            )
+            cand_tok = (
+                usage_raw.get("candidatesTokenCount")
+                or usage_raw.get("candidates_token_count")
+                or usage_raw.get("completion_tokens")
+                or 0
+            )
             total_prompt_tokens += int(prompt_tok)
             total_candidates_tokens += int(cand_tok)
 
             parsed_json = {}
             text_out = ""
-            choices = body_dict.get("choices") or []
-            if choices and isinstance(choices, list) and len(choices) > 0:
-                msg = choices[0].get("message") or {}
-                text_out = msg.get("content") or ""
+            candidates = response_obj.get("candidates") or []
+            if candidates and isinstance(candidates, list) and len(candidates) > 0:
+                cand0 = candidates[0]
+                content = cand0.get("content") or {}
+                parts = content.get("parts") or []
+                if parts and isinstance(parts, list) and len(parts) > 0:
+                    text_out = parts[0].get("text", "")
+
             if not text_out:
-                cands = body_dict.get("candidates") or []
-                if cands and isinstance(cands, list) and len(cands) > 0:
-                    text_out = cands[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                choices = response_obj.get("choices") or []
+                if choices and isinstance(choices, list) and len(choices) > 0:
+                    text_out = choices[0].get("message", {}).get("content", "")
 
             try:
                 if text_out:
@@ -180,7 +238,7 @@ def check_and_process_batch_job(batch_job_id: str, run_timestamp: str, agent_run
                 category_id=None,
                 source_path="",
                 llm_instruction="batch_sectionizer_job",
-                llm_content=json.dumps(response_body),
+                llm_content=json.dumps(item_dict),
                 output_json=parsed_json,
                 match_count=len(parsed_json.get("matches", [])),
                 run_timestamp=run_timestamp,
@@ -191,7 +249,7 @@ def check_and_process_batch_job(batch_job_id: str, run_timestamp: str, agent_run
         # Calculate actual post-completion token counts & cost proof
         from workflows.pricing_matrix import calculate_cost
         cost_proof = calculate_cost(
-            model_name="gemini-2.5-flash",
+            model_name=model_name,
             input_tokens=total_prompt_tokens,
             output_tokens=total_candidates_tokens,
         )
@@ -199,7 +257,7 @@ def check_and_process_batch_job(batch_job_id: str, run_timestamp: str, agent_run
         actual_batch_cost_inr = round(cost_proof["total_cost_inr"] * 0.5, 2)
 
         actual_usage_meta = {
-            "model": "gemini-2.5-flash",
+            "model": model_name,
             "batch_job_id": batch_job_id,
             "status": "COMPLETED",
             "total_documents_processed": created_count,
@@ -211,6 +269,10 @@ def check_and_process_batch_job(batch_job_id: str, run_timestamp: str, agent_run
             "actual_batch_cost_inr": actual_batch_cost_inr,
             "discount_applied": "50% Gemini Batch API discount",
         }
+        try:
+            actual_usage_meta["get_batch_response"] = json.loads(batch_job.model_dump_json())
+        except Exception:
+            pass
 
         logger.info(
             "Batch Job %s COMPLETED | Post-Completion Usage Meta: docs=%d, prompt_tokens=%d, candidates_tokens=%d, total_tokens=%d, actual_batch_cost=$%.6f (₹%.2f)",
@@ -244,7 +306,7 @@ class BatchSectionizerAgent(BaseAgent):
         )
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        docs = pipeline_client.load_documents_for_sectionizing()
+        docs = pipeline_client.load_documents_for_sectionizing()[:2]
         cats = pipeline_client.load_sectionizer_categories()
 
         if not docs:
@@ -261,10 +323,22 @@ class BatchSectionizerAgent(BaseAgent):
         os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
 
         count, usage_meta = prepare_batch_jsonl(docs, cats, jsonl_path)
-        batch_job_name = submit_batch_job(jsonl_path)
+        batch_job: types.BatchJob = submit_batch_job(jsonl_path)
+        batch_job_name = batch_job.name
+        
+        try:
+            usage_meta["create_batch_response"] = json.loads(batch_job.model_dump_json())
+        except Exception as e:
+            logger.warning("Could not dump BatchJob response: %s", e)
+
         doc_ids = [d.get("standardized_doc_id") or d.get("doc_id") for d in docs]
         
-        pipeline_client.record_batch_sectionizer_job(batch_job_name=batch_job_name, doc_ids=doc_ids, status="PENDING")
+        pipeline_client.record_batch_sectionizer_job(
+            batch_job_name=batch_job_name,
+            doc_ids=doc_ids,
+            status="PENDING",
+            usage_meta=usage_meta,
+        )
 
         output_payload = {
             "batch_job_name": batch_job_name,
@@ -282,5 +356,5 @@ class BatchSectionizerAgent(BaseAgent):
         )
 
 
-batch_sectionizer_agent = BatchSectionizerAgent()
-root_agent = batch_sectionizer_agent
+# batch_sectionizer_agent = BatchSectionizerAgent()
+# root_agent = batch_sectionizer_agent
