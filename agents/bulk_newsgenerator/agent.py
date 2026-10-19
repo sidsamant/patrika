@@ -326,6 +326,9 @@ async def end_node(ctx: Context,batch_job: types.BatchJob):
         content=types.Content(role="model", parts=[types.Part(text=json.dumps(output_payload, indent=2))]),
     )
 
+async def end_node_rejected(ctx: Context):
+    print(f"Context: {ctx}")
+    return Event(output="Not proceeding")
 
 # city_report_agent = Agent(
 #     name="city_report_agent",
@@ -371,7 +374,7 @@ root_agent = Workflow(
             request_approval_response_node,
             {
                 "route_proceed": submit_batch_job_node,
-                "route_do_not_proceed": end_node
+                "route_do_not_proceed": end_node_rejected
             }
         ),
         (
