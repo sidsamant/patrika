@@ -2,16 +2,16 @@ import asyncio
 import json
 from pathlib import Path
 import sys
-import time
-import types
-from typing import Any
+from typing import Any, Literal
 
 from google.adk import Agent
 from google.adk import Workflow
 from google.adk import Event
 from google.adk.workflow import JoinNode
 from opik import track
-from pydantic import BaseModel
+from cleantext import clean
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 from datetime import datetime
 from dotenv import load_dotenv
@@ -31,11 +31,23 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 ENV_PATH = PROJECT_ROOT / ".env"
-PROMPT_TEMPLATE_PATH = Path(__file__).with_name("prompt_template.md")
 
 load_dotenv(ENV_PATH)
 
 logger = logging.getLogger(__name__)
+
+# Prompt templates (Jinja2) live next to this file. StrictUndefined = a typo'd variable raises
+# instead of silently rendering as empty text.
+_jinja = Environment(
+    loader=FileSystemLoader(str(Path(__file__).parent)),
+    undefined=StrictUndefined,
+    autoescape=False,        # plain-text prompts: article text must not be HTML-escaped
+    trim_blocks=True,
+    lstrip_blocks=True,
+    keep_trailing_newline=False,
+)
+SYSTEM_PROMPT_TEMPLATE = _jinja.get_template("system_prompt.md.j2")
+ARTICLE_PROMPT_TEMPLATE = _jinja.get_template("article_prompt.md.j2")
 
 # Ensure ADK uses AI Studio instead of forcing Vertex AI
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "FALSE"
@@ -119,7 +131,7 @@ GoogleGenAiSdkInstrumentor().instrument()
 
 
 # Constant for batch LLM model - cheapest model for Gemini Batch API
-BATCH_MODEL_NAME = os.getenv("BATCH_SECTIONIZER_MODEL", "gemini-1.5-flash")
+BATCH_MODEL_NAME = os.getenv("BATCH_SECTIONIZER_MODEL", "gemini-3.8-flash")
 
 # def router(node_input: str):
 #     """Route to task B or C based on node_input."""
@@ -132,13 +144,147 @@ class NodeInput(TypedDict, total=False):
     load_documents_for_sectionizing: list[dict[str, Any]]
     load_categories_for_categories: list[dict[str, Any]]
 
+# ---------- Input models (pydantic does the parsing; unknown keys are ignored) ----------
+class Category(BaseModel):
+    model_config = ConfigDict(extra="ignore")  # drops rules, min_score
+    id: int = Field(validation_alias="sectionizer_category_id")
+    name: str
+    objective: str
+    ai_instructions: str | None = None
+
+
+class ArticleIn(BaseModel):
+    """One document as returned by the API. Only whitelisted fields ever reach the model."""
+    model_config = ConfigDict(extra="ignore")  # source_path, metadata, timestamps, ... dropped
+    # The API returns the body as "text"; "text_content" is accepted too.
+    text: str | None = Field(default=None, validation_alias=AliasChoices("text_content", "text"))
+    # In your data "author" is the crawl source name, not a person, so it is sent as <source>.
+    source_site: str | None = Field(default=None, validation_alias="author")
+    # Not provided by the API today (created_at is the DB insert time, not the publication
+    # date). Fill these only if the API ever returns real values.
+    title: str | None = None
+    published: str | None = Field(default=None, validation_alias="published_date")
+
+
+def load_categories(raw: list[dict[str, Any]]) -> list[Category]:
+    # sorted by id -> byte-identical system prompt on every request (cache friendly)
+    return sorted((Category.model_validate(c) for c in raw), key=lambda c: c.id)
+
+
+# ---------- Output schema (edit fields here only) ----------
+class Result(BaseModel):
+    category_ids: list[str] = Field(
+        max_length=3,
+        description="Matching category IDs, most relevant first. Empty if none fit.")
+    content_type: Literal["news", "analysis", "opinion"]
+    confidence: float = Field(ge=0, le=1, description="0-1 certainty of the primary category")
+    new_title: str
+    new_text: str
+
 
 tracer = trace.get_tracer("bulk_newsgenerator")
+
+MIN_SOURCE_WORDS = 40     # below this an item is really just a headline: skipped, not sent
+SKIP_REASON_THIN = "thin_source"
+MAX_ARTICLE_CHARS = 4000  # same cap as before (content_text[:4000])
+
+ESTIMATED_OUTPUT_TOKENS_PER_DOC = 1000   # flat; thinking tokens are most of the real output
+
+# TEST LIMIT: at most this many documents are submitted to Gemini per run (0 = no limit).
+# It counts documents that really go to the model: thin documents are skipped first and do not
+# use up the limit. Documents beyond the limit are left untouched ('ready') for a later run.
+# Set BATCH_MAX_DOCS=0 in .env to turn it off. The ADK server must be restarted to pick it up.
+BATCH_MAX_DOCS = int(os.getenv("BATCH_MAX_DOCS", "2") or 0)
+# BATCH_MAX_DOCS = 1
+
+# MANUAL TESTING WITHOUT COST: set GEMINI_EMULATOR_URL (for example http://127.0.0.1:8099) and run
+# gemini_batch_emulator.py. The real SDK then talks to the emulator: no real LLM call, nothing billed.
+# Unset it (and restart the ADK server) to use the real Gemini API again.
+EMULATOR_URL = os.getenv("GEMINI_EMULATOR_URL", "").rstrip("/")
+
+
+def _as_json(model) -> dict[str, Any]:
+    """An SDK type in the camelCase JSON form the batch file expects."""
+    return model.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+SAFETY_SETTINGS = [
+    _as_json(types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE))
+    for c in (
+        types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    )
+]
+
+
+def build_schema(cats: list[Category]) -> dict[str, Any]:
+    schema = Result.model_json_schema()
+    schema.pop("title", None)
+    for p in schema["properties"].values():
+        p.pop("title", None)
+    schema["properties"]["category_ids"]["items"] = {
+        "type": "string",
+        "enum": [str(c.id) for c in cats],
+    }
+    return schema
+
+
+def build_system_prompt(cats: list[Category]) -> str:
+    return SYSTEM_PROMPT_TEMPLATE.render(categories=cats)
+
+
+def clean_text(t: str | None) -> str:
+    return clean(
+        t or "",
+        fix_unicode=True, to_ascii=False, lower=False, no_line_breaks=False,
+        no_urls=True, replace_with_url="",
+        no_emails=True, replace_with_email="",
+    )
+
+
+def build_body(a: ArticleIn) -> str:
+    # The template omits <title> and <published> when empty.
+    return ARTICLE_PROMPT_TEMPLATE.render(
+        title=clean_text(a.title),
+        source=a.source_site,
+        published=a.published,
+        text=clean_text(a.text)[:MAX_ARTICLE_CHARS],
+    )
+
+
+def parse_result_line(line: str, cats: list[Category]) -> dict[str, Any]:
+    """Use this where the batch results file is read."""
+    rec = json.loads(line)
+    key = rec["key"]
+    resp = rec.get("response") or {}
+    cands = resp.get("candidates") or []
+    parts = (cands[0].get("content") or {}).get("parts") if cands else None
+    if not parts:
+        reason = ((resp.get("promptFeedback") or {}).get("blockReason")
+                  or (cands[0].get("finishReason") if cands else None)
+                  or rec.get("error") or "NO_CANDIDATE")
+        return {"key": key, "error": f"blocked_or_empty: {reason}"}
+    try:
+        res = Result.model_validate_json("".join(p.get("text", "") for p in parts))
+    except Exception as e:
+        return {"key": key, "error": f"invalid_output: {e}"}
+    names = {str(c.id): c.name for c in cats}
+    valid = [i for i in res.category_ids if i in names]
+    return {
+        "key": key,
+        "doc_id": key.removeprefix("doc_"),
+        **res.model_dump(),
+        "category_ids": [int(i) for i in valid],
+        "category_names": [names[i] for i in valid],
+    }
+
 
 async def load_documents_for_sectionizing():
     """Get the articles for sectionizing"""
     with tracer.start_as_current_span("load_documents_for_sectionizing"):
-        docs = (await asyncio.to_thread(pipeline_client.load_documents_for_sectionizing))[:2]
+        docs = await asyncio.to_thread(pipeline_client.load_documents_for_sectionizing)
     if not docs:
         yield Event(output="No documents to sectionize", route="default")
         return
@@ -156,52 +302,83 @@ def prepare_batch_jsonl(
     categories: list[dict[str, Any]],
     output_jsonl_path: str,
     model_name: str = BATCH_MODEL_NAME,
+    max_docs: int | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Formats a list of documents into JSONL format for Gemini Batch API and calculates estimated token counts & costs."""
+    """Formats documents into JSONL for Gemini Batch API and calculates estimated token counts & costs.
+
+    Thin-source documents (fewer than MIN_SOURCE_WORDS words) are NOT written to the JSONL.
+    They are listed in usage_meta["skipped_documents"] with the reason, so the caller can
+    show them to the user and record them against each document id.
+    """
     from workflows.pricing_matrix import calculate_cost
 
-    cats_block = "\n".join([f"- [{cat.get('id')}] {cat.get('name')}: {cat.get('description', '')}" for cat in categories])
-    
-    with open(PROMPT_TEMPLATE_PATH, "r", encoding="utf-8") as tf:
-        template = tf.read()
+    cats = load_categories(categories)
+    system_prompt = build_system_prompt(cats)   # rendered once, identical on every line
+    schema = build_schema(cats)
 
-    lines = []
-    total_prompt_chars = 0
+    # identical on every line, so built once
+    system_instruction = _as_json(types.Content(parts=[types.Part(text=system_prompt)]))
+    generation_config = _as_json(types.GenerationConfig(
+        temperature=0.4, response_mime_type="application/json", response_json_schema=schema))
+
+    lines: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    sample: list[dict[str, Any]] = []
+    line_estimates: dict[str, dict[str, Any]] = {}     # per document, saved in usage_meta["lines"]
+    deferred = 0                                       # documents left for a later run by max_docs
     for doc in documents:
+        if max_docs and len(lines) >= max_docs:
+            deferred += 1          # not examined, not skipped, not recorded: stays 'ready'
+            continue
         doc_id = doc.get("standardized_doc_id") or doc.get("doc_id")
-        content_text = doc.get("text_content") or ""
-        source_path = doc.get("source_path") or ""
-        
-        prompt = template.replace("{{source_path}}", source_path)
-        prompt = prompt.replace("{{title}}", str(doc.get("title") or ""))
-        prompt = prompt.replace("{{author}}", str(doc.get("author") or ""))
-        prompt = prompt.replace("{{text_content}}", content_text[:4000])
-        prompt = prompt.replace("{{categories_block}}", cats_block)
+        article = ArticleIn.model_validate(doc)
+        text = clean_text(article.text)
+        words = len(text.split())
 
-        total_prompt_chars += len(prompt)
+        if words < MIN_SOURCE_WORDS:
+            # A headline-only item has nothing to rewrite, so it never reaches the model.
+            skipped.append({
+                "doc_id": doc_id,
+                "reason": SKIP_REASON_THIN,
+                "detail": f"Only {words} word{'' if words == 1 else 's'} of text (minimum {MIN_SOURCE_WORDS})",
+                "word_count": words,
+                "content_sha256": doc.get("content_sha256"),
+            })
+            continue
 
-        # Standard Gemini Batch API request format (key + request)
+        body = build_body(article)
+        if len(sample) < 5:
+            sample.append({"doc_id": doc_id, "preview": " ".join(text.split())[:100]})
+
+        # Estimate for this line. The system prompt is billed on every request (before any cache
+        # discount). Measured against two real result lines: within 3-5% of the actual prompt tokens.
+        line_estimates[str(doc_id)] = {
+            "key": f"doc_{doc_id}",
+            "estimated_input_tokens": (len(system_prompt) + len(body)) // 4,
+            "estimated_output_tokens": ESTIMATED_OUTPUT_TOKENS_PER_DOC,
+        }
+
+        # Standard Gemini Batch API request format (key + request). No "tools" key -> no web search.
         request_row = {
             "key": f"doc_{doc_id}",
             "request": {
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [{"text": prompt}],
-                    }
-                ],
-                "generationConfig": {
-                    "responseMimeType": "application/json"
-                },
+                "systemInstruction": system_instruction,
+                "contents": [_as_json(types.Content(role="user", parts=[types.Part(text=body)]))],
+                "safetySettings": SAFETY_SETTINGS,
+                "generationConfig": generation_config,
             },
         }
-        lines.append(json.dumps(request_row))
+        lines.append(json.dumps(request_row, ensure_ascii=False))
 
-    with open(output_jsonl_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    with open(output_jsonl_path, "w", encoding="utf-8", newline="\n") as f:  # \n even on Windows
+        f.write("\n".join(lines) + ("\n" if lines else ""))
 
-    estimated_input_tokens = max(1, total_prompt_chars // 4)
-    estimated_output_tokens = len(documents) * 1000
+    if skipped:
+        logger.warning("Skipping %d docs with < %d words of text: %s",
+                       len(skipped), MIN_SOURCE_WORDS, [d["doc_id"] for d in skipped[:10]])
+
+    estimated_input_tokens = max(1, sum(e["estimated_input_tokens"] for e in line_estimates.values()))
+    estimated_output_tokens = sum(e["estimated_output_tokens"] for e in line_estimates.values())
 
     cost_proof = calculate_cost(
         model_name=model_name,
@@ -215,6 +392,7 @@ def prepare_batch_jsonl(
     usage_meta = {
         "model": model_name,
         "total_documents": len(documents),
+        "submitted_documents": len(lines),
         "estimated_input_tokens": estimated_input_tokens,
         "estimated_output_tokens": estimated_output_tokens,
         "estimated_total_tokens": estimated_input_tokens + estimated_output_tokens,
@@ -222,11 +400,95 @@ def prepare_batch_jsonl(
         "batch_cost_usd": batch_cost_usd,
         "batch_cost_inr": batch_cost_inr,
         "discount_applied": "50% Gemini Batch API discount",
+        "skipped_documents": skipped,
+        "max_docs": max_docs or None,
+        # lets the UI send this job's status checks to the emulator, and mark its results as emulated
+        "emulated": bool(EMULATOR_URL),
+        "emulator_url": EMULATOR_URL or None,
+        "deferred_documents": deferred,
+        "sample_articles": sample,
+        # per-line estimates; the batch detail page adds the actual counts when Gemini finishes
+        "lines": line_estimates,
+        # snapshot, so results can still be mapped if categories change before the batch finishes
+        "categories_snapshot": [{"id": c.id, "name": c.name} for c in cats],
     }
 
     return len(lines), usage_meta
 
+
+MAX_SKIPPED_ROWS_SHOWN = 10
+
+
+def format_approval_summary(count: int, meta: dict[str, Any]) -> str:
+    """Markdown shown to the user at the approval step."""
+    skipped = meta.get("skipped_documents") or []
+    cats = meta.get("categories_snapshot") or []
+    out = [
+        "## Batch ready for review",
+        "",
+    ] + (["> **EMULATOR MODE**: no real LLM call will be made and nothing is billed. "
+          "The cost below is what a real run would cost.", ""] if meta.get("emulated") else []) + [
+        f"**{count} article(s)** will be sent to `{meta['model']}` "
+        f"({meta['total_documents']} loaded, {len(skipped)} skipped"
+        + (f", {meta['deferred_documents']} held back by the test limit" if meta.get("deferred_documents") else "")
+        + ").",
+        "",
+        "| | |",
+        "|---|---|",
+        f"| Articles to submit | {count} |",
+        f"| Skipped (not sent) | {len(skipped)} |",
+    ] + ([f"| Held back by test limit (BATCH_MAX_DOCS={meta['max_docs']}) | {meta['deferred_documents']} |"]
+         if meta.get("max_docs") else []) + [
+        f"| Categories | {len(cats)} |",
+        f"| Est. input tokens | {meta['estimated_input_tokens']:,} |",
+        f"| Est. output tokens | {meta['estimated_output_tokens']:,} |",
+        f"| **Est. batch cost** | **${meta['batch_cost_usd']:,.4f} (₹{meta['batch_cost_inr']:,.2f})** |",
+        f"| Standard price, for reference | ${meta['standard_cost_usd']:,.4f} |",
+        "",
+        "_Estimates only: output is assumed at about 1,000 tokens per article._",
+    ]
+    if cats:
+        out += ["", "**Categories:** " + ", ".join(f"{c['name']} ({c['id']})" for c in cats)]
+    if meta.get("sample_articles"):
+        out += ["", "**First articles in this batch**"]
+        out += [f"- #{a['doc_id']}: {a['preview']}…" for a in meta["sample_articles"]]
+    if skipped:
+        out += [
+            "",
+            f"### Skipped: {len(skipped)} article(s) not sent to the model",
+            "| Doc ID | Words | Reason |",
+            "|---|---|---|",
+        ]
+        out += [f"| {d['doc_id']} | {d['word_count']} | {d['reason']}: {d['detail']} |"
+                for d in skipped[:MAX_SKIPPED_ROWS_SHOWN]]
+        if len(skipped) > MAX_SKIPPED_ROWS_SHOWN:
+            out.append(f"| … | | and {len(skipped) - MAX_SKIPPED_ROWS_SHOWN} more |")
+        out += ["", "_If you approve, these are recorded as skipped (with the reason and the batch "
+                    "name) against each document id once the batch is submitted. If you reply "
+                    "no, nothing is recorded._"]
+    out += ["", "**Submit this batch to Gemini? Reply `yes` or `no`.**"]
+    return "\n".join(out)
+
+
 # @track
+async def _record_skipped_documents(
+    skipped: list[dict[str, Any]], batch_job_name: str | None = None
+) -> str | None:
+    """Record why documents were skipped, against each document id.
+
+    Only called after the user approved. Never raises: returns an error message, or None.
+    """
+    if not skipped:
+        return None
+    items = [{**d, "batch_job_name": batch_job_name} for d in skipped]
+    try:
+        await asyncio.to_thread(pipeline_client.record_skipped_documents, items)
+    except Exception as e:
+        logger.exception("Could not record skipped documents")
+        return str(e)
+    return None
+
+
 async def prepare_jsonl_node(node_input: NodeInput):
     """Prepare the jsonl document for submission for batch API"""
 
@@ -237,16 +499,33 @@ async def prepare_jsonl_node(node_input: NodeInput):
     jsonl_path = os.path.join(PROJECT_ROOT, ".output", f"batch_input_{run_ts}.jsonl")
     os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
 
-    yield Event(state={
-        "jsonl_path": jsonl_path,
-        "prepare_batch_jsonl":prepare_batch_jsonl(docs, cats, jsonl_path)
-    })
+    count, usage_meta = prepare_batch_jsonl(docs, cats, jsonl_path, max_docs=BATCH_MAX_DOCS or None)
+
+    # Skipped docs are left out of the JSONL here, but nothing is saved yet: the skip reasons
+    # are recorded only after the user approves (see record_batch_job_node).
+    submitted = set(usage_meta["lines"])        # keys are str(doc_id): exactly the documents in the JSONL
+    all_ids = [d.get("standardized_doc_id") or d.get("doc_id") for d in docs]
+    yield Event(
+        route="route_has_requests" if count else "route_nothing_to_submit",
+        state={
+            "jsonl_path": jsonl_path,
+            "doc_ids": [i for i in all_ids if str(i) in submitted],  # submitted docs only
+            "prepare_batch_jsonl": (count, usage_meta),
+        },
+    )
 
 def _get_genai_client() -> genai.Client:
-    for env_name in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GENAI_API_KEY"):
+    if EMULATOR_URL:
+        # a dummy key: the real key must never be sent to a local server
+        logger.warning("GEMINI_EMULATOR_URL is set: using the Gemini emulator at %s. "
+                       "NO real LLM call is made and nothing is billed.", EMULATOR_URL)
+        return genai.Client(api_key="emulator", http_options=types.HttpOptions(base_url=EMULATOR_URL))
+    for env_name in ("GOOGLE_API_KEY_PAID",): #GOOGLE_API_KEY_PAID
         api_key = os.getenv(env_name)
         if api_key:
+            logger.info("Gemini client uses %s (ends ...%s)", env_name, api_key[-4:])
             return genai.Client(api_key=api_key)
+    logger.info("Gemini client uses the SDK's default env lookup (GOOGLE_API_KEY / GEMINI_API_KEY)")
     return genai.Client()
 
 
@@ -256,7 +535,7 @@ def submit_batch_job(jsonl_file_path: str, model_name: str = BATCH_MODEL_NAME) -
     logger.info("Uploading batch JSONL file to Gemini API: %s", jsonl_file_path)
     file_ref = client.files.upload(
         file=jsonl_file_path,
-        config=types.UploadFileConfig(mime_type="text/plain"),
+        config=types.UploadFileConfig(mime_type="jsonl"),
     )
     
     logger.info("Creating Gemini Batch Job using model %s...", model_name)
@@ -267,64 +546,122 @@ def submit_batch_job(jsonl_file_path: str, model_name: str = BATCH_MODEL_NAME) -
     logger.info("Batch job created successfully. Job Name: %s", batch_job.name)
     return batch_job
 
-async def submit_batch_job_node(ctx: Context):
+# Where the batch job detail page lives, for the link in the final chat message.
+# The path is the "sectionizer:batch_job_detail" route; adjust it if the app is mounted elsewhere.
+UI_BASE_URL = os.getenv("SENTINEL_UI_URL", "http://localhost:8000").rstrip("/")
+BATCH_JOB_PATH = os.getenv("SENTINEL_BATCH_JOB_PATH", "/sectionizer/batches/{job_id}/")
+
+
+def batch_job_url(job_id: int | None) -> str | None:
+    return f"{UI_BASE_URL}{BATCH_JOB_PATH.format(job_id=job_id)}" if job_id else None
+
+
+# ── Passing values between nodes ──────────────────────────────────────────────
+# Values travel through ctx.state. A node declares what it needs as function parameters:
+# ADK looks every parameter except ctx / node_input up in state BY NAME and converts it to the
+# annotated type. node_input is kept only for real inputs: the joined load results
+# (prepare_jsonl_node) and the user's yes/no reply (request_approval_response_node).
+#
+# State keys:  jsonl_path, docs_len, doc_ids, prepare_batch_jsonl = (count, usage_meta),
+#              batch_job (JSON form of the Gemini BatchJob), batch_job_id (our database id),
+#              skip_recording_error
+
+async def submit_batch_job_node(ctx: Context, jsonl_path: str):
     print(f"attempts state: {ctx.state}") # attempts state: attempts: 1
-    jsonl_path=ctx.state.get("jsonl_path")
     batch_job: types.BatchJob = submit_batch_job(jsonl_path)
-    
-    yield Event(output=batch_job)
+
+    # JSON-safe, so it also survives a database-backed session service.
+    yield Event(state={"batch_job": batch_job.model_dump(mode="json")})
 
 
-async def record_batch_job_node(ctx: Context, batch_job: types.BatchJob ):
-    count, usage_meta = ctx.state.prepare_batch_jsonl
-    
+async def record_batch_job_node(
+    batch_job: types.BatchJob,
+    prepare_batch_jsonl: tuple[int, dict[str, Any]],
+    doc_ids: list[Any],
+):
+    count, usage_meta = prepare_batch_jsonl
     batch_job_name = batch_job.name
     try:
         usage_meta["create_batch_response"] = json.loads(batch_job.model_dump_json())
     except Exception as e:
         logger.warning("Could not dump BatchJob response: %s", e)
 
-    doc_ids = [d.get("standardized_doc_id") or d.get("doc_id") for d in docs]
-    
-    pipeline_client.record_batch_sectionizer_job(
+    recorded = pipeline_client.record_batch_sectionizer_job(
         batch_job_name=batch_job_name,
         doc_ids=doc_ids,
         status="PENDING",
         usage_meta=usage_meta,
     )
-    yield batch_job
+    batch_job_id = (recorded or {}).get("batch_job_id")    # needed for the link to the detail page
 
-async def request_approval_node(): # Human input step
-  yield RequestInput(message="Should we proceed (yes/no)?:")
+    # The user approved: now record why the thin docs were skipped, against each document id.
+    skip_error = await _record_skipped_documents(
+        usage_meta.get("skipped_documents", []), batch_job_name=batch_job_name)
+
+    yield Event(state={
+        "skip_recording_error": skip_error,
+        "batch_job_id": batch_job_id,
+        # written back explicitly: the node worked on a copy, and end_node shows create_batch_response
+        "prepare_batch_jsonl": (count, usage_meta),
+    })
+
+async def request_approval_node(prepare_batch_jsonl: tuple[int, dict[str, Any]]): # Human input step
+    count, usage_meta = prepare_batch_jsonl
+    yield RequestInput(message=format_approval_summary(count, usage_meta))
 
 async def request_approval_response_node(node_input: str): # Human input step
-    if node_input=="yes":
+    if node_input.strip().lower() in ("yes", "y"):
         yield Event(route="route_proceed")
     else:
         yield Event(route="route_do_not_proceed")
 
-async def end_node(ctx: Context,batch_job: types.BatchJob):
+async def end_node(
+    ctx: Context,
+    batch_job: types.BatchJob,
+    prepare_batch_jsonl: tuple[int, dict[str, Any]],
+    jsonl_path: str,
+    docs_len: int,
+    skip_recording_error: str | None = None,
+    batch_job_id: int | None = None,
+):
     print(f"Context: {ctx}")
-    count, usage_meta = ctx.state.prepare_batch_jsonl
-    
-    batch_job_name = batch_job.name
-    jsonl_path=ctx.state.jsonl_path
-    docs_len=ctx.state.docs_len
+    count, usage_meta = prepare_batch_jsonl
 
     output_payload = {
-        "batch_job_name": batch_job_name,
+        "batch_job_name": batch_job.name,
         "status": "PENDING",
         "usage_meta": usage_meta,
         "totalRows": docs_len,
         "submittedRequests": count,
+        "skippedDocuments": len(usage_meta.get("skipped_documents", [])),
         "jsonl_path": jsonl_path,
     }
+
+    if skip_recording_error:
+        output_payload["skipRecordingError"] = skip_recording_error
+
+    url = batch_job_url(batch_job_id)
+    output_payload["batch_job_id"] = batch_job_id
+    output_payload["batch_job_url"] = url
+    message = json.dumps(output_payload, indent=2)
+    if url:   # the link to the batch job detail page, shown in the chat message
+        message = f"Batch job submitted: [Open batch job #{batch_job_id}]({url})\n\n```json\n{message}\n```"
 
     yield Event(
         #author=self.name,
         invocation_id=ctx.invocation_id,
-        content=types.Content(role="model", parts=[types.Part(text=json.dumps(output_payload, indent=2))]),
+        content=types.Content(role="model", parts=[types.Part(text=message)]),
     )
+
+async def end_node_nothing(prepare_batch_jsonl: tuple[int, dict[str, Any]]):
+    # Nothing is sent to the model, so there is no approval step and no cost to approve.
+    _, usage_meta = prepare_batch_jsonl
+    skipped = usage_meta["skipped_documents"]
+    err = await _record_skipped_documents(skipped)
+    msg = f"Nothing to submit: all {len(skipped)} loaded document(s) were skipped. "
+    msg += (f"Could not record the skip reasons: {err}" if err
+            else "The skip reason is recorded against each document id.")
+    yield Event(output=msg)
 
 async def end_node_rejected(ctx: Context):
     print(f"Context: {ctx}")
@@ -367,9 +704,15 @@ root_agent = Workflow(
         # ("START",load_documents_for_sectionizing)
         ("START",load_documents_for_sectionizing,my_join_node),
         ("START",load_categories_for_categories,my_join_node),
+        (my_join_node, prepare_jsonl_node),
         (
-            my_join_node, prepare_jsonl_node, request_approval_node, request_approval_response_node
+            prepare_jsonl_node,
+            {
+                "route_has_requests": request_approval_node,
+                "route_nothing_to_submit": end_node_nothing,
+            },
         ),
+        (request_approval_node, request_approval_response_node),
         (
             request_approval_response_node,
             {

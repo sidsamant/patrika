@@ -1,0 +1,13 @@
+{# Sent as the user message, rendered once per article.
+   Variables: title (may be empty), source, published (may be empty), text (URLs already stripped, text already truncated).
+   Deliberately no source URL/path: the model never sees a link. #}
+<article>
+{% if title %}
+<title>{{ title }}</title>
+{% endif %}
+<source>{{ source or "unknown" }}</source>
+{% if published %}
+<published>{{ published }}</published>
+{% endif %}
+<text>{{ text }}</text>
+</article>

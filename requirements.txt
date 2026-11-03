@@ -18,3 +18,5 @@ opentelemetry-sdk>=1.20.0
 opentelemetry-instrumentation-google-genai
 opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-httpx
+clean-text>=0.6.0
+pydantic>=2.5

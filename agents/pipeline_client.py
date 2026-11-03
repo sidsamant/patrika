@@ -193,6 +193,16 @@ def load_documents_for_sectionizing() -> list[dict[str, Any]]:
     return _get("documents/for-sectionizing/").get("items") or []
 
 
+def record_skipped_documents(items: list[dict[str, Any]]) -> int:
+    """Mark documents that were left out of an LLM batch as skipped, recording why.
+
+    Each item: {"doc_id": int, "reason": str, "detail": str, "batch_job_name": str | None}
+    (extra keys are ignored). Returns how many documents were updated.
+    """
+    result = _post("documents/mark-skipped/", {"items": items})
+    return int(result.get("updated") or 0)
+
+
 def load_sectionizer_categories() -> list[dict[str, Any]]:
     return _get("sectionizer-categories/").get("items") or []
 

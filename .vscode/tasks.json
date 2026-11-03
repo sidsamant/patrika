@@ -41,5 +41,22 @@
             },
             "problemMatcher": [] 
         }
+,        {
+            "label": "Gemini emulator",
+            "type": "shell",
+            "command": ".\\.venv\\Scripts\\Activate.ps1;  python gemini_batch_emulator.py ;",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+                }
+            },
+            "group": "none",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": [] 
+        }
     ]
 }
