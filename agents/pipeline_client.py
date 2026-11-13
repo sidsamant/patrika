@@ -80,6 +80,10 @@ def finish_agent_run(
 
 # ── Hoarder ───────────────────────────────────────────────────────────────────
 
+def load_hoarder_output(key: str) -> dict[str, Any]:
+    return _get(f"hoarder-outputs/{key}")
+
+
 def persist_hoarder_batch(items: list[dict[str, Any]], agent_run_id: int | None = None) -> int:
     result = _post("hoarder-outputs/", {"items": items, "agent_run_id": agent_run_id})
     return int(result.get("created") or 0)
@@ -189,6 +193,7 @@ def standardize_document(
 
 # ── Sectionizer ───────────────────────────────────────────────────────────────
 
+
 def load_documents_for_sectionizing() -> list[dict[str, Any]]:
     return _get("documents/for-sectionizing/").get("items") or []
 
@@ -232,6 +237,9 @@ def create_sectionizer_output(
         "agent_run_id": agent_run_id,
     })
 
+
+def load_sectionizer_output(output_id:str) -> dict[str, Any]:
+    return _get(f"sectionizer-outputs/{output_id}")
 
 # ── Newsletter generator ──────────────────────────────────────────────────────
 

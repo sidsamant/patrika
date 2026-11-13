@@ -4,14 +4,19 @@
         {
             "label": "ADK Web Bulk Generator",
             "type": "shell",
-            "command": ".\\.venv\\Scripts\\Activate.ps1; cd ./agents ; adk web bulk_newsgenerator --port 8280;",
+            "command": ".\\.venv\\Scripts\\Activate.ps1; cd ./agents ; adk web --port 8280;",
             "options": {
                 "env": {
                     "OTEL_SERVICE_NAME": "adk-agent-service"
                 },
                 "shell": {
                     "executable": "powershell.exe",
-                    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
                 }
             },
             "group": "none",
@@ -19,9 +24,9 @@
                 "reveal": "always",
                 "panel": "new"
             },
-            "problemMatcher": [] 
-        }
-,        {
+            "problemMatcher": []
+        },
+        {
             "label": "ADK API",
             "type": "shell",
             "command": ".\\.venv\\Scripts\\Activate.ps1;  adk.exe api_server agents/ --port 8001 ;",
@@ -31,7 +36,12 @@
                 },
                 "shell": {
                     "executable": "powershell.exe",
-                    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
                 }
             },
             "group": "none",
@@ -39,16 +49,21 @@
                 "reveal": "always",
                 "panel": "new"
             },
-            "problemMatcher": [] 
-        }
-,        {
+            "problemMatcher": []
+        },
+        {
             "label": "Gemini emulator",
             "type": "shell",
             "command": ".\\.venv\\Scripts\\Activate.ps1;  python gemini_batch_emulator.py ;",
             "options": {
                 "shell": {
                     "executable": "powershell.exe",
-                    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
                 }
             },
             "group": "none",
@@ -56,7 +71,7 @@
                 "reveal": "always",
                 "panel": "new"
             },
-            "problemMatcher": [] 
+            "problemMatcher": []
         }
     ]
 }
