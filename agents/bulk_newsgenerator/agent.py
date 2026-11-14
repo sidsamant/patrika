@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 from typing import Any, Literal
 
-from agents.utils import ESTIMATED_OUTPUT_TOKENS_PER_DOC, MIN_SOURCE_WORDS, SKIP_REASON_THIN, ArticleIn, Category, NodeInput, build_body, build_schema, build_system_prompt, clean_text, load_categories
+from utils import ESTIMATED_OUTPUT_TOKENS_PER_DOC, MIN_SOURCE_WORDS, SKIP_REASON_THIN, ArticleIn, Category, NodeInput, build_body, build_schema, build_system_prompt, clean_text, load_categories
 from google.adk import Agent
 from google.adk import Workflow
 from google.adk import Event
@@ -488,7 +488,8 @@ async def request_approval_node(prepare_batch_jsonl: tuple[int, dict[str, Any]])
     yield RequestInput(message=format_approval_summary(count, usage_meta))
 
 async def request_approval_response_node(node_input: str): # Human input step
-    if node_input.strip().lower() in ("yes", "y"):
+    print(node_input)
+    if node_input.strip().lower() in ("yes", "y","approved"):
         yield Event(route="route_proceed")
     else:
         yield Event(route="route_do_not_proceed")

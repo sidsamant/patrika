@@ -92,7 +92,7 @@ def do_nothing_node(node_input: Any):
 @node(rerun_on_resume=True)
 async def front_node(ctx: Context, node_input: str) -> str:
     # run_node executes a node and returns its output
-    payload = json.loads(node_input)
+    payload = json.loads(node_input) or {}
     if(payload["function"]=="estimatetokens"):
         result = await ctx.run_node(estimatetokens_node, node_input=json.dumps(payload["payload"]))
         return result

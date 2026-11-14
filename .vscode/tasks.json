@@ -29,7 +29,7 @@
         {
             "label": "ADK API",
             "type": "shell",
-            "command": ".\\.venv\\Scripts\\Activate.ps1;  adk.exe api_server agents/ --port 8001 ;",
+            "command": ".\\.venv\\Scripts\\Activate.ps1;  adk.exe api_server agents/ --port 8001  --allow_origins=\"http://localhost:8000\" ;",
             "options": {
                 "env": {
                     "OTEL_SERVICE_NAME": "adk-agent-service"
