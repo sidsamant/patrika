@@ -49,7 +49,7 @@ from google.genai import types
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-_SENTINELPRESS_ROOT = str(PROJECT_ROOT.parent / "sentinelpress")
+_SENTINELPRESS_ROOT = str(PROJECT_ROOT.parent / "backend")  # SentientPress Django backend (sibling folder)
 if _SENTINELPRESS_ROOT not in sys.path:
     sys.path.insert(0, _SENTINELPRESS_ROOT)
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sentinelpress.settings")
