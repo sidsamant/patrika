@@ -92,12 +92,20 @@ def do_nothing_node(node_input: Any):
 @node(rerun_on_resume=True)
 async def front_node(ctx: Context, node_input: str) -> str:
     # run_node executes a node and returns its output
-    payload = json.loads(node_input) or {}
-    if(payload["function"]=="estimatetokens"):
-        result = await ctx.run_node(estimatetokens_node, node_input=json.dumps(payload["payload"]))
-        return result
-    else:
-        await ctx.run_node(do_nothing_node, node_input="hello")
+    # Set by the backend chat UI (ChatApp.jsx) via the /run_sse stateDelta.
+    page_url = ctx.state.get("pageUrl", "")
+    logger.info("front_node page_url=%s", page_url)
+
+    try:
+        payload = json.loads(node_input) or {}
+    except json.JSONDecodeError:
+        logger.warning("front_node received non-JSON input: %.200s", node_input)
+        payload = {}
+
+    if payload.get("function") == "estimatetokens":
+        return await ctx.run_node(estimatetokens_node, node_input=json.dumps(payload.get("payload", {})))
+    await ctx.run_node(do_nothing_node, node_input="hello")
+
 
 # Run the workflow
 root_agent = Workflow(
