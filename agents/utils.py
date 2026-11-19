@@ -152,3 +152,43 @@ def parse_result_line(line: str, cats: list[Category]) -> dict[str, Any]:
 
 def build_system_prompt(cats: list[Category]) -> str:
     return SYSTEM_PROMPT_TEMPLATE.render(categories=cats)
+
+
+# ---------- Claude editor (chat on the sectionizer detail page) ----------
+EDITOR_ADDENDUM_TEMPLATE = _jinja.get_template("editor_conversation.md.j2")
+
+
+class EditorTurn(BaseModel):
+    """One Claude reply in the editor conversation. draft follows the batch job's Result."""
+    reply: str
+    draft: Result | None = None
+
+
+def build_editor_system_prompt(cats: list[Category]) -> str:
+    """The batch job's system prompt, unchanged, followed by the conversation rules."""
+    return build_system_prompt(cats) + "\n\n" + EDITOR_ADDENDUM_TEMPLATE.render()
+
+
+# Claude structured outputs reject these JSON Schema keywords; Result.model_validate still
+# enforces them on the reply.
+_CLAUDE_UNSUPPORTED_KEYS = ("maxItems", "minItems", "minimum", "maximum",
+                            "exclusiveMinimum", "exclusiveMaximum", "maxLength", "minLength")
+
+
+def build_editor_schema(cats: list[Category]) -> dict[str, Any]:
+    """JSON schema for EditorTurn that Claude structured outputs accept."""
+    draft = build_schema(cats)
+    for prop in draft["properties"].values():
+        for key in _CLAUDE_UNSUPPORTED_KEYS:
+            prop.pop(key, None)
+    draft["additionalProperties"] = False
+    draft["required"] = list(draft["properties"])
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["reply", "draft"],
+        "properties": {
+            "reply": {"type": "string", "description": "Short message to the editor."},
+            "draft": {"anyOf": [draft, {"type": "null"}]},
+        },
+    }

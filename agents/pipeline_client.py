@@ -350,12 +350,63 @@ def update_approval_actuals(
     actual_total_tokens: int,
     actual_cost_usd: float,
     actual_cost_inr: float,
+    actual_breakdown: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Update approval request with post-execution actual token counts and reconciled costs."""
-    return _patch(f"approvals/{approval_id}/actuals/", {
+    """Update approval request with post-execution actual token counts and reconciled costs.
+
+    actual_breakdown (optional) is stored under token_breakdown["actual"], e.g. thinking and
+    cache tokens, which have no columns of their own.
+    """
+    body: dict[str, Any] = {
         "actual_prompt_tokens": actual_prompt_tokens,
         "actual_completion_tokens": actual_completion_tokens,
         "actual_total_tokens": actual_total_tokens,
         "actual_cost_usd": str(actual_cost_usd),
         "actual_cost_inr": str(actual_cost_inr),
+    }
+    if actual_breakdown is not None:
+        body["actual_breakdown"] = actual_breakdown
+    return _patch(f"approvals/{approval_id}/actuals/", body)
+
+
+def decide_approval(workflow_id: str, approved: bool) -> dict[str, Any]:
+    """Record the user's decision on a PENDING cost approval (APPROVED / REJECTED)."""
+    return _post(f"approvals/{workflow_id}/decision/", {"action": "approve" if approved else "reject"})
+
+
+# ── Chat turns (ui.ui_prompts) ────────────────────────────────────────────────
+
+def create_chat_turn(
+    *,
+    session_id: str | None,
+    prompt_type: str,
+    provider: str,
+    model: str,
+    system_prompt: str | None,
+    user_prompt: str,
+    response_text: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    latency_ms: int | None,
+    target_type: str | None,
+    target_id: int | None,
+) -> dict[str, Any]:
+    """Save one chat turn (prompt + response). Returns {"prompt_id": ...}."""
+    return _post("chat/turns/", {
+        "session_id": session_id, "prompt_type": prompt_type, "provider": provider,
+        "model": model, "system_prompt": system_prompt, "user_prompt": user_prompt,
+        "response_text": response_text, "input_tokens": input_tokens,
+        "output_tokens": output_tokens, "latency_ms": latency_ms,
+        "target_type": target_type, "target_id": target_id,
     })
+
+
+def list_chat_turns(*, target_type: str, target_id: int, provider: str | None = None,
+                    prompt_type: str | None = None) -> list[dict[str, Any]]:
+    """Chat turns for one target, oldest first."""
+    params: dict[str, Any] = {"target_type": target_type, "target_id": target_id}
+    if provider:
+        params["provider"] = provider
+    if prompt_type:
+        params["prompt_type"] = prompt_type
+    return _get("chat/turns/", params).get("items") or []
