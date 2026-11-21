@@ -7,7 +7,8 @@ Routes each message:
 
 Claude editor flow: prepare the batch job's prompt -> ask for cost approval (first draft of an
 article only) -> call Claude -> save the turn (ui.ui_prompts) and the actual cost
-(pipeline.llm_cost_approval_requests) -> show a draft card in the chat.
+(pipeline.llm_cost_approval_requests) -> chat message linking to the turn in "Claude Drafts".
+Each reply also suggests at least 5 things to research; the editor pastes extracts into the chat.
 """
 import asyncio
 import json
@@ -34,8 +35,8 @@ load_dotenv(ENV_PATH)
 
 import pipeline_client  # noqa: E402
 from claude_editor import ClaudeArticleEditor, EditorResult, HistoryTurn  # noqa: E402
-from sectionizer_prompt import ArticleNotReady, SectionizerPromptBuilder  # noqa: E402
-from utils import ESTIMATED_OUTPUT_TOKENS_PER_DOC, build_editor_system_prompt  # noqa: E402
+from sectionizer_prompt import ArticleNotReady, SectionizerPromptBuilder, ThinArticle  # noqa: E402
+from utils import ESTIMATED_OUTPUT_TOKENS_PER_DOC, MIN_SOURCE_WORDS, build_editor_system_prompt  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -130,13 +131,21 @@ def _load_history(output_id: int) -> list[HistoryTurn]:
     return history
 
 
-def format_editor_approval(estimate: dict[str, Any], output_id: int, title: str | None) -> str:
+def format_editor_approval(estimate: dict[str, Any], output_id: int, title: str | None,
+                           thin_words: int | None = None) -> str:
     """Markdown shown at the approval step (first draft of an article only)."""
+    warning = [] if thin_words is None else [
+        f"> **Short article:** only {thin_words} words of text. The batch job skips articles under "
+        f"{MIN_SOURCE_WORDS} words because Claude has little to work with, so the draft may mostly "
+        "restate the headline.",
+        "",
+    ]
     return "\n".join([
         "## Send this article to Claude?",
         "",
         f"Article #{output_id}" + (f": {title}" if title else ""),
         "",
+        *warning,
         "| | |",
         "|---|---|",
         f"| Model | `{estimate['model']}` (effort {estimate['effort']}) |",
@@ -152,8 +161,14 @@ def format_editor_approval(estimate: dict[str, Any], output_id: int, title: str 
 
 
 async def editor_prepare_node(editor_output_id: int, editor_user_text: str):
+    thin_words = None
     try:
-        article = await asyncio.to_thread(_builder.prepare, editor_output_id)
+        try:
+            article = await asyncio.to_thread(_builder.prepare, editor_output_id)
+        except ThinArticle as exc:
+            # Below the batch minimum: still allowed here, but the approval step warns the user.
+            thin_words = exc.words
+            article = await asyncio.to_thread(_builder.prepare, editor_output_id, True)
         history = await asyncio.to_thread(_load_history, editor_output_id)
     except ArticleNotReady as exc:
         yield Event(route="route_stop", state={"editor_message": str(exc)})
@@ -190,13 +205,16 @@ async def editor_prepare_node(editor_output_id: int, editor_user_text: str):
         state={
             "editor_estimate": estimate,
             "editor_title": article.title,
+            "editor_thin_words": thin_words,
             "editor_approval": {"approval_id": created.get("approval_id"), "workflow_id": workflow_id},
         },
     )
 
 
-async def editor_approval_node(editor_estimate: dict, editor_output_id: int, editor_title: str | None = None):
-    yield RequestInput(message=format_editor_approval(editor_estimate, editor_output_id, editor_title))
+async def editor_approval_node(editor_estimate: dict, editor_output_id: int, editor_title: str | None = None,
+                               editor_thin_words: int | None = None):
+    yield RequestInput(message=format_editor_approval(editor_estimate, editor_output_id, editor_title,
+                                                      editor_thin_words))
 
 
 async def editor_approval_response_node(node_input: Any, editor_approval: dict):
@@ -235,7 +253,8 @@ def _record_actuals(approval_id: int | None, result: EditorResult) -> None:
 
 async def editor_call_node(ctx: Context, editor_output_id: int, editor_user_text: str, editor_approval: dict):
     try:
-        article = await asyncio.to_thread(_builder.prepare, editor_output_id)
+        # A short article only reaches this node after the user approved it (now or earlier).
+        article = await asyncio.to_thread(_builder.prepare, editor_output_id, True)
         history = await asyncio.to_thread(_load_history, editor_output_id)
     except Exception as exc:
         logger.exception("Claude editor: could not reload article #%s", editor_output_id)
@@ -275,11 +294,15 @@ async def editor_call_node(ctx: Context, editor_output_id: int, editor_user_text
         "output_id": editor_output_id,
         "prompt_id": prompt_id,
         "reply": result.reply,
-        "draft": result.draft,
+        # the chat only links to the turn; the full draft and suggestions are in "Claude Drafts"
+        "draft": ({"new_title": result.draft.get("new_title"),
+                   "category_names": result.draft.get("category_names")} if result.draft else None),
         "model": result.served_model or _editor.model,
         "usage": result.usage,
         "cost_usd": (result.cost or {}).get("total_cost_usd"),
         "cost_inr": (result.cost or {}).get("total_cost_inr"),
+        "suggestions": len(result.research_suggestions),
+        "sources_used": len(result.sources_used),
     }
     yield _chat_message(ctx, f"{result.reply}\n\n```json\n{json.dumps(card, indent=2)}\n```")
 

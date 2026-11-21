@@ -158,10 +158,23 @@ def build_system_prompt(cats: list[Category]) -> str:
 EDITOR_ADDENDUM_TEMPLATE = _jinja.get_template("editor_conversation.md.j2")
 
 
+MIN_RESEARCH_SUGGESTIONS = 5
+
+
+class ResearchSuggestion(BaseModel):
+    """Something the editor could look up to make the article more informative."""
+    topic: str
+    why: str
+    queries: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+
+
 class EditorTurn(BaseModel):
     """One Claude reply in the editor conversation. draft follows the batch job's Result."""
     reply: str
     draft: Result | None = None
+    research_suggestions: list[ResearchSuggestion] = Field(default_factory=list)
+    sources_used: list[str] = Field(default_factory=list)
 
 
 def build_editor_system_prompt(cats: list[Category]) -> str:
@@ -186,9 +199,32 @@ def build_editor_schema(cats: list[Category]) -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["reply", "draft"],
+        "required": ["reply", "draft", "research_suggestions", "sources_used"],
         "properties": {
             "reply": {"type": "string", "description": "Short message to the editor."},
             "draft": {"anyOf": [draft, {"type": "null"}]},
+            "research_suggestions": {
+                "type": "array",
+                "description": f"At least {MIN_RESEARCH_SUGGESTIONS} things (no upper limit) the editor "
+                               "could research on the web to make the article more informative, "
+                               "most useful first.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["topic", "why", "queries", "sources"],
+                    "properties": {
+                        "topic": {"type": "string", "description": "What to look up."},
+                        "why": {"type": "string", "description": "What it would add to the article."},
+                        "queries": {"type": "array", "items": {"type": "string"},
+                                    "description": "One to three web search queries."},
+                        "sources": {"type": "array", "items": {"type": "string"},
+                                    "description": "Kinds of sources or sites likely to have it."},
+                    },
+                },
+            },
+            "sources_used": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Source URLs or names of the editor's extracts used in this draft.",
+            },
         },
     }

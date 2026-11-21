@@ -43,6 +43,10 @@ CLAUDE_PRICING: dict[str, dict[str, float]] = {
                         "cache_read_per_1m": 0.50, "cache_write_per_1m": 6.25},
 }
 
+# Claude web search server tool: $10 per 1,000 searches, plus the search results as input tokens.
+# A search that fails with an error is not billed.
+CLAUDE_WEB_SEARCH_USD_PER_SEARCH = 0.01
+
 
 def calculate_claude_cost(
     model_name: str,
@@ -50,6 +54,7 @@ def calculate_claude_cost(
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    web_searches: int = 0,
     usd_to_inr_rate: float = DEFAULT_USD_TO_INR_RATE,
 ) -> dict[str, Any]:
     """Cost of one Claude call in USD and INR. Raises KeyError for a model with no rates,
@@ -61,7 +66,10 @@ def calculate_claude_cost(
         + cache_read_tokens * rates["cache_read_per_1m"]
         + cache_write_tokens * rates["cache_write_per_1m"]
     ) / 1_000_000.0
+    search_usd = web_searches * CLAUDE_WEB_SEARCH_USD_PER_SEARCH
+    usd += search_usd
     return {
+        "web_search_cost_usd": round(search_usd, 6),
         "model_name": model_name,
         "rates": rates,
         "total_cost_usd": round(usd, 6),

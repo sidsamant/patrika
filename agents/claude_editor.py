@@ -16,7 +16,8 @@ import anthropic
 from pydantic import ValidationError
 
 from sectionizer_prompt import PreparedArticle
-from utils import ESTIMATED_OUTPUT_TOKENS_PER_DOC, EditorTurn, build_editor_schema, build_editor_system_prompt
+from utils import (ESTIMATED_OUTPUT_TOKENS_PER_DOC, MIN_RESEARCH_SUGGESTIONS, EditorTurn, build_editor_schema,
+                   build_editor_system_prompt)
 from workflows.pricing_matrix import calculate_claude_cost
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,8 @@ class EditorResult:
     usage: dict[str, Any] = field(default_factory=dict)
     cost: dict[str, Any] | None = None
     latency_ms: int | None = None
+    research_suggestions: list[dict[str, Any]] = field(default_factory=list)
+    sources_used: list[str] = field(default_factory=list)
 
 
 class ClaudeArticleEditor:
@@ -153,8 +156,12 @@ class ClaudeArticleEditor:
             logger.exception("Claude editor: reply did not match the schema: %.300s", raw)
             return EditorResult(ok=False, reply="Claude's reply did not match the expected format.",
                                 raw_text=None, **base)
-        return EditorResult(ok=True, reply=turn.reply, draft=self._draft(turn, article),
-                            raw_text=raw, **base)
+        if len(turn.research_suggestions) < MIN_RESEARCH_SUGGESTIONS:   # the schema cannot require a count
+            logger.warning("Claude editor: only %d research suggestions (asked for %d)",
+                           len(turn.research_suggestions), MIN_RESEARCH_SUGGESTIONS)
+        return EditorResult(ok=True, reply=turn.reply, draft=self._draft(turn, article), raw_text=raw,
+                            research_suggestions=[s.model_dump() for s in turn.research_suggestions],
+                            sources_used=turn.sources_used, **base)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

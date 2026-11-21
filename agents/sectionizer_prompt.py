@@ -27,6 +27,14 @@ class ArticleNotReady(Exception):
     """The article cannot be sent to a model. str(exc) is a message for the user."""
 
 
+class ThinArticle(ArticleNotReady):
+    """Below MIN_SOURCE_WORDS. The batch job skips it; the editor may send it if the user agrees."""
+
+    def __init__(self, words: int) -> None:
+        self.words = words
+        super().__init__(f"Only {words} word{'' if words == 1 else 's'} of text (minimum {MIN_SOURCE_WORDS}).")
+
+
 @dataclass(frozen=True)
 class PreparedArticle:
     output_id: int
@@ -47,7 +55,8 @@ class SectionizerPromptBuilder:
     def __init__(self, client: Any = pipeline_client) -> None:
         self._client = client
 
-    def prepare(self, output_id: int) -> PreparedArticle:
+    def prepare(self, output_id: int, allow_thin: bool = False) -> PreparedArticle:
+        """allow_thin=True skips the minimum-length check (the user chose to send it anyway)."""
         raw = self._client.load_sectionizer_output(str(output_id))
         if not raw:
             raise ArticleNotReady(f"Sectionizer output #{output_id} was not found.")
@@ -61,10 +70,9 @@ class SectionizerPromptBuilder:
         doc = self._client.load_hoarder_output(output.batch.key.removeprefix("doc_"))
         article = ArticleIn.model_validate(doc["source_payload_json"])
         words = len(clean_text(article.text).split())
-        if words < MIN_SOURCE_WORDS:
-            # A headline-only item has nothing to rewrite, so it never reaches the model.
-            raise ArticleNotReady(
-                f"Only {words} word{'' if words == 1 else 's'} of text (minimum {MIN_SOURCE_WORDS}).")
+        if words < MIN_SOURCE_WORDS and not allow_thin:
+            # A headline-only item has little to rewrite; the batch job never sends it.
+            raise ThinArticle(words)
 
         cats = load_categories(self._client.load_sectionizer_categories())
         return PreparedArticle(
